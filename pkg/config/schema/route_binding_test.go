@@ -198,6 +198,61 @@ func TestAdminRouteBindingValidatesURIParameterAgainstPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "path does not declare URI parameter")
 }
 
+func TestAdminRouteBindingRejectsRoutesRuntimeCannotMap(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		from      string
+		wantError string
+		paramType string
+	}{
+		{
+			name:      "duplicate URI placeholder",
+			path:      "/api/v1/users/:id/orders/:id",
+			from:      "uri.id",
+			paramType: "java.lang.String",
+			wantError: "declared more than once",
+		},
+		{
+			name:      "placeholder with nested-source separator",
+			path:      "/api/v1/users/:user.id",
+			from:      "uri.user.id",
+			paramType: "java.lang.String",
+			wantError: "must contain only letters",
+		},
+		{
+			name:      "query source with whitespace",
+			path:      "/api/v1/users/:id",
+			from:      "queryStrings.user name",
+			paramType: "java.lang.String",
+			wantError: "must match",
+		},
+		{
+			name:      "unsupported byte conversion",
+			path:      "/api/v1/users/:id",
+			from:      "uri.id",
+			paramType: "java.lang.Byte",
+			wantError: "unsupported scalar Dubbo map type",
+		},
+	}
+
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			object := validRouteBindingObject()
+			object.Spec["entry"].(map[string]any)["path"] = test.path
+			object.Spec["params"] = []any{
+				map[string]any{"from": test.from, "to": 0, "type": test.paramType},
+			}
+
+			err := registry.Validate(object)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.wantError)
+		})
+	}
+}
+
 func TestAdminRouteBindingRejectsBlankRequiredStrings(t *testing.T) {
 	registry, err := NewBuiltinRegistry()
 	require.NoError(t, err)
@@ -209,6 +264,21 @@ func TestAdminRouteBindingRejectsBlankRequiredStrings(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "spec.target.interface")
 	assert.Contains(t, err.Error(), "must not be empty")
+}
+
+func TestAdminRouteBindingRejectsWhitespaceInDubboIdentifiers(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	object := validRouteBindingObject()
+	target := object.Spec["target"].(map[string]any)
+	target["interface"] = " com.example.UserService "
+	target["method"] = "GetUser "
+
+	err = registry.Validate(object)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.target.interface")
+	assert.Contains(t, err.Error(), "spec.target.method")
+	assert.Contains(t, err.Error(), "must not contain leading or trailing whitespace")
 }
 
 func validRouteBindingObject() AdminObject {

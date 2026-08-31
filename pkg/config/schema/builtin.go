@@ -19,8 +19,12 @@ package schema
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 )
+
+var routeParameterNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // RegisterBuiltinSchemas installs only the Admin-facing route binding. Legacy
 // Resource and Method are compiler outputs rather than form objects.
@@ -112,7 +116,7 @@ func adminRouteBindingSchema() ObjectSchema {
 						"from": {
 							Type:        FieldTypeString,
 							Required:    true,
-							Pattern:     `^(uri|queryStrings|headers|requestBody)\..+`,
+							Pattern:     `^((uri|queryStrings|headers)\.[A-Za-z0-9_-]+|requestBody\.[A-Za-z0-9_.-]+)$`,
 							Description: "legacy mappingParams.name",
 						},
 						"to": {
@@ -173,7 +177,12 @@ func validateAdminRouteBinding(object AdminObject) []ValidationIssue {
 
 	entry, _ := object.Spec["entry"].(map[string]any)
 	path, _ := entry["path"].(string)
-	pathParameters := routePathParameters(path)
+	pathParameters, pathIssues := validateRoutePath(path)
+	issues = append(issues, pathIssues...)
+	target, _ := object.Spec["target"].(map[string]any)
+	for _, field := range []string{"application", "interface", "method", "version", "group", "cluster"} {
+		validateExactString(&issues, "spec.target."+field, target[field])
+	}
 
 	params, ok := object.Spec["params"].([]any)
 	if !ok {
@@ -201,12 +210,16 @@ func validateAdminRouteBinding(object AdminObject) []ValidationIssue {
 			seenIndexes[to] = index
 		}
 
-		if paramType, ok := param["type"].(string); ok && !isSupportedParamType(paramType) {
-			issues = append(issues, issue(
-				fmt.Sprintf("spec.params[%d].type", index),
-				"unsupported",
-				fmt.Sprintf("unsupported scalar Dubbo map type %q", paramType),
-			))
+		if paramType, ok := param["type"].(string); ok {
+			paramTypePath := fmt.Sprintf("spec.params[%d].type", index)
+			validateExactString(&issues, paramTypePath, paramType)
+			if !isSupportedParamType(paramType) {
+				issues = append(issues, issue(
+					paramTypePath,
+					"unsupported",
+					fmt.Sprintf("unsupported scalar Dubbo map type %q", paramType),
+				))
+			}
 		}
 
 		if from, ok := param["from"].(string); ok {
@@ -224,6 +237,14 @@ func validateAdminRouteBinding(object AdminObject) []ValidationIssue {
 		}
 	}
 	return issues
+}
+
+func validateExactString(issues *[]ValidationIssue, path string, value any) {
+	text, ok := value.(string)
+	if !ok || text == "" || strings.TrimSpace(text) == text {
+		return
+	}
+	*issues = append(*issues, issue(path, "whitespace", "must not contain leading or trailing whitespace"))
 }
 
 func validateURIParameter(issues *[]ValidationIssue, pathParameters map[string]struct{}, from string, index int) {
@@ -249,25 +270,46 @@ func validateURIParameter(issues *[]ValidationIssue, pathParameters map[string]s
 	}
 }
 
-func routePathParameters(path string) map[string]struct{} {
+func validateRoutePath(path string) (map[string]struct{}, []ValidationIssue) {
 	parameters := make(map[string]struct{})
+	issues := make([]ValidationIssue, 0)
+	if strings.TrimSpace(path) != path || strings.IndexFunc(path, unicode.IsSpace) >= 0 {
+		issues = append(issues, issue("spec.entry.path", "whitespace", "path must not contain whitespace"))
+	}
+	if strings.ContainsAny(path, "?#") {
+		issues = append(issues, issue("spec.entry.path", "path_only", "path must not contain a query or fragment"))
+	}
 	for _, segment := range strings.Split(strings.Trim(path, "/"), "/") {
 		if !strings.HasPrefix(segment, ":") {
 			continue
 		}
 		name := strings.TrimPrefix(segment, ":")
-		if name != "" {
-			parameters[name] = struct{}{}
+		if !routeParameterNamePattern.MatchString(name) {
+			issues = append(issues, issue(
+				"spec.entry.path",
+				"path_parameter",
+				fmt.Sprintf("URI parameter %q must contain only letters, numbers, '_' or '-'", name),
+			))
+			continue
 		}
+		if _, exists := parameters[name]; exists {
+			issues = append(issues, issue(
+				"spec.entry.path",
+				"duplicate_path_parameter",
+				fmt.Sprintf("URI parameter %q is declared more than once", name),
+			))
+			continue
+		}
+		parameters[name] = struct{}{}
 	}
-	return parameters
+	return parameters, issues
 }
 
 func isSupportedParamType(value string) bool {
 	switch strings.TrimSpace(value) {
-	case "string", "char", "short", "int", "long", "float", "double", "boolean", "byte", "date", "object",
+	case "string", "char", "short", "int", "long", "float", "double", "boolean", "date", "object",
 		"java.lang.String", "java.lang.Character", "java.lang.Short", "java.lang.Integer", "java.lang.Long",
-		"java.lang.Float", "java.lang.Double", "java.lang.Boolean", "java.lang.Byte", "java.lang.Object", "java.util.Date":
+		"java.lang.Float", "java.lang.Double", "java.lang.Boolean", "java.lang.Object", "java.util.Date":
 		return true
 	default:
 		return false

@@ -48,6 +48,10 @@ export default new Router({
           component: () => import('@/views/dashboard/manage/Mapping.vue')
         },
         {
+          path: 'RouteBinding',
+          component: () => import('@/views/dashboard/manage/RouteBinding.vue')
+        },
+        {
           path: 'Plug',
           component: () => import('@/views/dashboard/manage/Plug.vue')
         },
