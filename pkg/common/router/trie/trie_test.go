@@ -225,6 +225,12 @@ func TestTrieSoftDelete(t *testing.T) {
 
 	_, err := trie.Remove("/a/b/c")
 	assert.NoError(t, err)
+	_, _, ok, err = trie.Get("/a/b/c")
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	contains, err := trie.Contains("/a/b/c")
+	assert.NoError(t, err)
+	assert.False(t, contains)
 
 	node, _, ok = trie.Match("/a/b/c")
 	assert.False(t, ok)
@@ -241,4 +247,11 @@ func TestTrieSoftDelete(t *testing.T) {
 	node, _, ok = trie.Match("/a/b/c/")
 	assert.False(t, ok)
 	assert.Nil(t, node)
+
+	ret, err = trie.Put("/a/b/c", "route4")
+	assert.NoError(t, err)
+	assert.True(t, ret)
+	node, _, ok = trie.Match("/a/b/c")
+	assert.True(t, ok)
+	assert.Equal(t, "route4", node.GetBizInfo())
 }

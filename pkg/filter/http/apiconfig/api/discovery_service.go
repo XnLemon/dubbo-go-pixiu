@@ -95,10 +95,20 @@ func (l *LocalMemoryAPIDiscoveryService) ClearAPI() error {
 // RemoveAPIByPath remove all api belonged to path
 func (l *LocalMemoryAPIDiscoveryService) RemoveAPIByPath(deleted config.Resource) error {
 	_, groupPath := getDefaultPath()
-	fullPath := getFullPath(groupPath, deleted.Path)
-
-	l.router.DeleteNode(fullPath)
+	deleteAPIResourceTree(l.router, groupPath, deleted)
 	return nil
+}
+
+func deleteAPIResourceTree(route *router.Route, groupPath string, resource config.Resource) {
+	fullPath := getFullPath(groupPath, resource.Path)
+	childGroupPath := resource.Path
+	if childGroupPath == constant.PathSlash {
+		childGroupPath = ""
+	}
+	for _, child := range resource.Resources {
+		deleteAPIResourceTree(route, childGroupPath, child)
+	}
+	route.DeleteNode(fullPath)
 }
 
 func (l *LocalMemoryAPIDiscoveryService) RemoveAPIByIntance(api router.API) error {

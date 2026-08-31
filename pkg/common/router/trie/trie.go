@@ -256,7 +256,7 @@ func (node *Node) Get(keys []string) (*Node, []string, bool, error) {
 		} else if stringutil.IsMatchAll(key) {
 			return node.MatchAllNode, nil, true, nil
 		} else {
-			if node.children == nil {
+			if node.children == nil || node.children[key] == nil || !node.children[key].endOfPath {
 				return nil, nil, false, nil
 			}
 			return node.children[key], nil, true, nil

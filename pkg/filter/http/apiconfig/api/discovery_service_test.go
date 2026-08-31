@@ -24,6 +24,7 @@ import (
 
 import (
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 import (
@@ -182,4 +183,40 @@ func TestLoadAPIFromMethods(t *testing.T) {
 	rsp, _ = apiDiscSrv.GetAPI("/mock", constant.Get)
 	assert.Equal(t, rsp.URLPattern, "/mock")
 	assert.True(t, strings.Contains(err.Error(), "path: /mock, Method: PUT, error: Method PUT with address /mock already exists in path /mock"))
+}
+
+func TestResourceRecoveryRebuildsNestedRoutes(t *testing.T) {
+	service := NewLocalMemoryAPIDiscoveryService()
+	parentMethod := mock.GetMockAPI(constant.Get, "").Method
+	childMethod := mock.GetMockAPI(constant.Get, "").Method
+	resource := config.Resource{
+		Type:    "Restful",
+		Path:    "/users",
+		Methods: []config.Method{parentMethod},
+		Resources: []config.Resource{
+			{
+				Type:    "Restful",
+				Path:    "/:id",
+				Methods: []config.Method{childMethod},
+			},
+		},
+	}
+
+	assert.True(t, service.ResourceAdd(resource))
+	_, err := service.MatchAPI("/users", constant.Get)
+	require.NoError(t, err)
+	_, err = service.MatchAPI("/users/42", constant.Get)
+	require.NoError(t, err)
+
+	assert.True(t, service.ResourceDelete(resource))
+	_, err = service.MatchAPI("/users", constant.Get)
+	assert.Error(t, err)
+	_, err = service.MatchAPI("/users/42", constant.Get)
+	assert.Error(t, err)
+
+	assert.True(t, service.ResourceAdd(resource))
+	_, err = service.MatchAPI("/users", constant.Get)
+	require.NoError(t, err)
+	_, err = service.MatchAPI("/users/42", constant.Get)
+	require.NoError(t, err)
 }
