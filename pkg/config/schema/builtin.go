@@ -78,7 +78,7 @@ func adminRouteBindingSchema() ObjectSchema {
 					"application": {
 						Type:        FieldTypeString,
 						Required:    true,
-						Description: "Dubbo applicationName",
+						Description: "Dubbo application metadata retained for legacy and registry-adapter integration",
 						UI:          UIHints{Component: "text", Order: 20},
 					},
 					"interface": {
@@ -96,7 +96,7 @@ func adminRouteBindingSchema() ObjectSchema {
 					"cluster": {
 						Type:        FieldTypeString,
 						Required:    true,
-						Description: "legacy integrationRequest.clusterName",
+						Description: "legacy cluster metadata; route-specific provider selection is deferred",
 						UI:          UIHints{Component: "text", Order: 70},
 					},
 				},
@@ -130,6 +130,12 @@ func adminRouteBindingSchema() ObjectSchema {
 				},
 				UI: UIHints{Component: "parameter-binding-table", Group: "params", Order: 30},
 			},
+			"timeout": {
+				Type:        FieldTypeString,
+				Default:     defaultRouteTimeout.String(),
+				Description: "request timeout applied to the generated Resource and Method",
+				UI:          UIHints{Component: "duration", Group: "runtime", Order: 40},
+			},
 			"publish": {
 				Type:    FieldTypeObject,
 				Default: map[string]any{},
@@ -146,24 +152,34 @@ func adminRouteBindingSchema() ObjectSchema {
 						UI:      UIHints{Component: "switch", Order: 20},
 					},
 				},
-				UI: UIHints{Group: "publish", Order: 40, Advanced: true},
+				UI: UIHints{Group: "publish", Order: 50, Advanced: true},
 			},
 			"extensions": {
 				Type:    FieldTypeObject,
 				Default: map[string]any{},
-				UI:      UIHints{Component: "extension-fields", Group: "advanced", Order: 50, Advanced: true},
+				UI:      UIHints{Component: "extension-fields", Group: "advanced", Order: 60, Advanced: true},
 			},
 		},
 	}
 }
 
 func validateAdminRouteBinding(object AdminObject) []ValidationIssue {
-	params, ok := object.Spec["params"].([]any)
-	if !ok {
-		return nil
+	issues := make([]ValidationIssue, 0)
+	if timeout, ok := object.Spec["timeout"].(string); ok {
+		if _, err := parsePositiveDuration(timeout); err != nil {
+			issues = append(issues, issue("spec.timeout", "duration", err.Error()))
+		}
 	}
 
-	issues := make([]ValidationIssue, 0)
+	entry, _ := object.Spec["entry"].(map[string]any)
+	path, _ := entry["path"].(string)
+	pathParameters := routePathParameters(path)
+
+	params, ok := object.Spec["params"].([]any)
+	if !ok {
+		return issues
+	}
+
 	seenIndexes := make(map[int]int, len(params))
 	for index, rawParam := range params {
 		param, ok := rawParam.(map[string]any)
@@ -192,6 +208,10 @@ func validateAdminRouteBinding(object AdminObject) []ValidationIssue {
 				fmt.Sprintf("unsupported scalar Dubbo map type %q", paramType),
 			))
 		}
+
+		if from, ok := param["from"].(string); ok {
+			validateURIParameter(&issues, pathParameters, from, index)
+		}
 	}
 
 	for expected := 0; expected < len(params); expected++ {
@@ -204,6 +224,43 @@ func validateAdminRouteBinding(object AdminObject) []ValidationIssue {
 		}
 	}
 	return issues
+}
+
+func validateURIParameter(issues *[]ValidationIssue, pathParameters map[string]struct{}, from string, index int) {
+	source, name, found := strings.Cut(from, ".")
+	if !found || source != "uri" {
+		return
+	}
+	path := fmt.Sprintf("spec.params[%d].from", index)
+	if strings.TrimSpace(name) == "" || strings.Contains(name, ".") {
+		*issues = append(*issues, issue(
+			path,
+			"uri_source",
+			"URI mappings must use uri.<path-parameter>",
+		))
+		return
+	}
+	if _, exists := pathParameters[name]; !exists {
+		*issues = append(*issues, issue(
+			path,
+			"uri_parameter_not_found",
+			fmt.Sprintf("path does not declare URI parameter %q", name),
+		))
+	}
+}
+
+func routePathParameters(path string) map[string]struct{} {
+	parameters := make(map[string]struct{})
+	for _, segment := range strings.Split(strings.Trim(path, "/"), "/") {
+		if !strings.HasPrefix(segment, ":") {
+			continue
+		}
+		name := strings.TrimPrefix(segment, ":")
+		if name != "" {
+			parameters[name] = struct{}{}
+		}
+	}
+	return parameters
 }
 
 func isSupportedParamType(value string) bool {

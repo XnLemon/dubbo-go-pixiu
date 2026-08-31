@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 type ValidationIssue struct {
@@ -131,6 +132,9 @@ func validateValue(path string, value any, field *FieldSchema) []ValidationIssue
 		if !ok {
 			return []ValidationIssue{typeIssue(path, field.Type, value)}
 		}
+		if field.Required && strings.TrimSpace(valueString) == "" {
+			return []ValidationIssue{issue(path, "required", "must not be empty")}
+		}
 		if field.Pattern != "" {
 			matched, _ := regexp.MatchString(field.Pattern, valueString)
 			if !matched {
@@ -188,6 +192,21 @@ func validateValue(path string, value any, field *FieldSchema) []ValidationIssue
 		return []ValidationIssue{issue(path, "enum", fmt.Sprintf("must be one of %v", field.Enum))}
 	}
 	return nil
+}
+
+func parsePositiveDuration(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, fmt.Errorf("must be a non-empty duration")
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("must be a valid duration: %w", err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("must be greater than zero")
+	}
+	return duration, nil
 }
 
 func applyDefaultsToFields(values map[string]any, fields map[string]*FieldSchema) {

@@ -21,14 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
 	legacyconfig "github.com/apache/dubbo-go-pixiu/pkg/config"
 )
-
-const defaultRouteTimeout = time.Second
 
 // CompiledRoute is the preview boundary between the Admin-facing object and
 // Pixiu's current APIConfig model. Publish metadata is deliberately omitted.
@@ -60,6 +57,18 @@ func CompileAdminRouteBinding(registry *Registry, object AdminObject) (CompiledR
 	if err != nil {
 		return CompiledRoute{}, err
 	}
+	timeout := defaultRouteTimeout
+	if rawTimeout, exists := normalized.Spec["timeout"]; exists {
+		timeoutString, ok := rawTimeout.(string)
+		if !ok {
+			return CompiledRoute{}, fmt.Errorf("spec.timeout is not a duration string")
+		}
+		parsedTimeout, err := parsePositiveDuration(timeoutString)
+		if err != nil {
+			return CompiledRoute{}, fmt.Errorf("spec.timeout: %w", err)
+		}
+		timeout = parsedTimeout
+	}
 
 	path := stringField(entry, "path")
 	entryProtocol := stringField(entry, "protocol")
@@ -67,7 +76,7 @@ func CompileAdminRouteBinding(registry *Registry, object AdminObject) (CompiledR
 	method := legacyconfig.Method{
 		ResourcePath: path,
 		Enable:       true,
-		Timeout:      defaultRouteTimeout,
+		Timeout:      timeout,
 		HTTPVerb:     stringField(entry, "method"),
 		InboundRequest: legacyconfig.InboundRequest{
 			RequestType: entryProtocol,
@@ -105,7 +114,7 @@ func CompileAdminRouteBinding(registry *Registry, object AdminObject) (CompiledR
 	resource := legacyconfig.Resource{
 		Type:    "restful",
 		Path:    path,
-		Timeout: defaultRouteTimeout,
+		Timeout: timeout,
 	}
 	return CompiledRoute{
 		Source:   normalized,

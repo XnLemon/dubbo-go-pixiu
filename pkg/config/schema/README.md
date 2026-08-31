@@ -28,11 +28,12 @@ registered as Admin form objects.
 `spec map[string]any`. `ObjectSchema` and `FieldSchema` define the form,
 defaults, and validation rules for the dynamic values.
 
-The built-in `AdminRouteBinding` schema has four user-facing sections:
+The built-in `AdminRouteBinding` schema has five user-facing sections:
 
 - `entry`: HTTP protocol, path, and method.
 - `target`: Dubbo application, interface, method, version, group, and cluster.
 - `params`: ordered HTTP-source to Dubbo-argument mappings.
+- `timeout`: positive duration applied to both generated legacy route levels.
 - `publish`: Admin control-plane intent; it is never emitted into Pixiu YAML.
 
 Typed plugin fields can be inserted below `spec.extensions` through the same
@@ -40,3 +41,9 @@ registry without changing the stored Go object.
 
 See [`testdata/admin_route_binding.yaml`](testdata/admin_route_binding.yaml) for
 the complete example and `CompiledRoute.PreviewYAML` for the legacy output.
+
+The `target.application` and `target.cluster` values are retained in the
+legacy projection for compatibility with registry-adapter metadata. In this
+phase they do not independently select a provider or registry in the standard
+HTTP-to-Dubbo outbound client; that route-specific discovery contract belongs
+to a later adapter integration.

@@ -24,6 +24,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+
+	legacyconfig "github.com/apache/dubbo-go-pixiu/pkg/config"
 )
 
 func TestAdminRouteBindingYAMLRoundTrip(t *testing.T) {
@@ -75,14 +78,14 @@ func TestCompileAdminRouteBindingToLegacyResourceAndMethod(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/api/v1/users/:id", compiled.Resource.Path)
 	assert.Equal(t, "restful", compiled.Resource.Type)
-	assert.Equal(t, time.Second, compiled.Resource.Timeout)
+	assert.Equal(t, 2*time.Second, compiled.Resource.Timeout)
 	assert.Empty(t, compiled.Resource.Methods)
 
 	method := compiled.Method
 	assert.Equal(t, "/api/v1/users/:id", method.ResourcePath)
 	assert.Equal(t, "GET", method.HTTPVerb)
 	assert.True(t, method.Enable)
-	assert.Equal(t, time.Second, method.Timeout)
+	assert.Equal(t, 2*time.Second, method.Timeout)
 	assert.Equal(t, "http", method.InboundRequest.RequestType)
 	assert.Equal(t, "dubbo", method.IntegrationRequest.RequestType)
 	assert.Equal(t, "UserProvider", method.ApplicationName)
@@ -119,6 +122,25 @@ func TestPreviewYAMLContainsOnlyLegacyAPIConfig(t *testing.T) {
 	assert.NotContains(t, previewString, "publish:")
 }
 
+func TestPreviewYAMLLoadsIntoLegacyAPIConfig(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	compiled, err := CompileAdminRouteBinding(registry, loadExampleRouteBinding(t))
+	require.NoError(t, err)
+
+	preview, err := compiled.PreviewYAML()
+	require.NoError(t, err)
+	var legacy legacyconfig.APIConfig
+	require.NoError(t, yaml.Unmarshal(preview, &legacy))
+
+	require.Len(t, legacy.Resources, 1)
+	require.Len(t, legacy.Resources[0].Methods, 1)
+	assert.Equal(t, "user-get", legacy.Name)
+	assert.Equal(t, 2*time.Second, legacy.Resources[0].Timeout)
+	assert.Equal(t, 2*time.Second, legacy.Resources[0].Methods[0].Timeout)
+	assert.Equal(t, "uri.id", legacy.Resources[0].Methods[0].MappingParams[0].Name)
+}
+
 func TestAdminRouteBindingValidationReportsActionablePaths(t *testing.T) {
 	registry, err := NewBuiltinRegistry()
 	require.NoError(t, err)
@@ -134,6 +156,59 @@ func TestAdminRouteBindingValidationReportsActionablePaths(t *testing.T) {
 	assert.Contains(t, err.Error(), "spec.params[0].type")
 	assert.Contains(t, err.Error(), "spec.params[1].to")
 	assert.Contains(t, err.Error(), "argument indexes must be contiguous from 0")
+}
+
+func TestAdminRouteBindingRejectsInvalidTimeout(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	object := validRouteBindingObject()
+	object.Spec["timeout"] = "0s"
+
+	err = registry.Validate(object)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.timeout")
+	assert.Contains(t, err.Error(), "must be greater than zero")
+
+	object.Spec["timeout"] = "not-a-duration"
+	err = registry.Validate(object)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a valid duration")
+}
+
+func TestAdminRouteBindingUsesDefaultTimeout(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	compiled, err := CompileAdminRouteBinding(registry, validRouteBindingObject())
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, compiled.Resource.Timeout)
+	assert.Equal(t, time.Second, compiled.Method.Timeout)
+}
+
+func TestAdminRouteBindingValidatesURIParameterAgainstPath(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	object := validRouteBindingObject()
+	object.Spec["params"] = []any{
+		map[string]any{"from": "uri.other", "to": 0, "type": "java.lang.String"},
+	}
+
+	err = registry.Validate(object)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.params[0].from")
+	assert.Contains(t, err.Error(), "path does not declare URI parameter")
+}
+
+func TestAdminRouteBindingRejectsBlankRequiredStrings(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	object := validRouteBindingObject()
+	target := object.Spec["target"].(map[string]any)
+	target["interface"] = "  "
+
+	err = registry.Validate(object)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.target.interface")
+	assert.Contains(t, err.Error(), "must not be empty")
 }
 
 func validRouteBindingObject() AdminObject {

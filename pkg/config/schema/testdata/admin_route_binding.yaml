@@ -18,6 +18,7 @@ spec:
     - from: uri.id
       to: 0
       type: java.lang.String
+  timeout: 2s
   publish:
     mode: draft
     validate: true

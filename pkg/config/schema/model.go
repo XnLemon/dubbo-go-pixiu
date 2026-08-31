@@ -17,9 +17,19 @@
 
 package schema
 
-import "github.com/apache/dubbo-go-pixiu/pkg/common/copyutil"
+import (
+	"time"
 
-const KindAdminRouteBinding = "AdminRouteBinding"
+	"github.com/apache/dubbo-go-pixiu/pkg/common/copyutil"
+)
+
+const (
+	KindAdminRouteBinding = "AdminRouteBinding"
+
+	// defaultRouteTimeout keeps the first Admin binding compatible with the
+	// legacy Resource and Method YAML defaults.
+	defaultRouteTimeout = time.Second
+)
 
 // AdminObject is the YAML object edited by Admin. Its stable envelope stays
 // small; the registered schema gives the dynamic spec its actual contract.
