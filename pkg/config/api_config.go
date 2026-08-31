@@ -31,6 +31,7 @@ import (
 	perrors "github.com/pkg/errors"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 import (
@@ -39,14 +40,72 @@ import (
 	"github.com/apache/dubbo-go-pixiu/pkg/model"
 )
 
-const DefaultTimeoutStr = "1s"
+const (
+	DefaultTimeoutStr        = "1s"
+	apiConfigWatchRetryDelay = 100 * time.Millisecond
+)
 
 var (
-	apiConfig *APIConfig
-	client    *etcdv3.Client
-	listener  APIConfigResourceListener
-	lock      sync.RWMutex
+	apiConfig      *APIConfig
+	listener       APIConfigResourceListener
+	lock           sync.RWMutex
+	listenerGateMu sync.Mutex
+	listenerGate   chan struct{}
 )
+
+type apiConfigSource interface {
+	Snapshot(prefix string) (keys, values []string, revision int64, err error)
+	Watch(prefix string, revision int64) (clientv3.WatchChan, error)
+	Done() <-chan struct{}
+}
+
+type etcdAPIConfigSource struct {
+	client *etcdv3.Client
+}
+
+func (s *etcdAPIConfigSource) Snapshot(prefix string) ([]string, []string, int64, error) {
+	raw := s.client.GetRawClient()
+	if raw == nil {
+		return nil, nil, 0, perrors.New("etcd raw client is nil")
+	}
+	response, err := raw.Get(s.client.GetCtx(), normalizeAPIConfigPrefix(prefix), clientv3.WithPrefix())
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	keys := make([]string, 0, len(response.Kvs))
+	values := make([]string, 0, len(response.Kvs))
+	for _, item := range response.Kvs {
+		keys = append(keys, string(item.Key))
+		values = append(values, string(item.Value))
+	}
+	return keys, values, response.Header.Revision, nil
+}
+
+func (s *etcdAPIConfigSource) Watch(prefix string, revision int64) (clientv3.WatchChan, error) {
+	options := []clientv3.OpOption{clientv3.WithPrefix()}
+	if revision > 0 {
+		options = append(options, clientv3.WithRev(revision))
+	}
+	return s.client.WatchWithOption(normalizeAPIConfigPrefix(prefix), options...)
+}
+
+func (s *etcdAPIConfigSource) Done() <-chan struct{} {
+	return s.client.Done()
+}
+
+func normalizeAPIConfigPrefix(prefix string) string {
+	if strings.HasSuffix(prefix, "/") {
+		return prefix
+	}
+	return prefix + "/"
+}
+
+func resetAPIConfigListenerGate() <-chan struct{} {
+	listenerGateMu.Lock()
+	defer listenerGateMu.Unlock()
+	listenerGate = make(chan struct{})
+	return listenerGate
+}
 
 var (
 	BASE_INFO_NAME = "name"
@@ -243,18 +302,119 @@ func LoadAPIConfig(metaConfig *model.APIMetaConfig) (*APIConfig, error) {
 		return nil, perrors.Errorf("Init etcd client fail error %s", err)
 	}
 
-	client = tmpClient
-	kList, vList, err := client.GetChildren(metaConfig.APIConfigPath)
+	source := &etcdAPIConfigSource{client: tmpClient}
+	loaded, watchRevision, err := loadAPIConfigFromSource(source, metaConfig.APIConfigPath)
 	if err != nil {
 		return nil, perrors.Errorf("Get remote config fail error %s", err)
 	}
-	if err = initAPIConfigFromKVList(kList, vList); err != nil {
-		return nil, err
-	}
 	// TODO: init other setting which need fetch from remote
-	go listenResourceAndMethodEvent(metaConfig.APIConfigPath)
+	ready := resetAPIConfigListenerGate()
+	go watchAPIConfigWithRecovery(source, metaConfig.APIConfigPath, watchRevision, ready)
 	// TODO: watch other setting which need fetch from remote
-	return apiConfig, nil
+	return loaded, nil
+}
+
+func loadAPIConfigFromSource(source apiConfigSource, path string) (*APIConfig, int64, error) {
+	kList, vList, revision, err := source.Snapshot(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err = initAPIConfigFromKVList(kList, vList); err != nil {
+		return nil, 0, err
+	}
+	return apiConfig, revision + 1, nil
+}
+
+func watchAPIConfigWithRecovery(source apiConfigSource, path string, revision int64, ready <-chan struct{}) {
+	for {
+		listenResourceAndMethodEvent(source, path, revision, ready)
+		if apiConfigSourceStopped(source) {
+			return
+		}
+		if !waitForAPIConfigListener(source, ready) {
+			return
+		}
+		ready = nil
+
+		previousResources := apiConfigResourcesSnapshot()
+		_, nextRevision, err := loadAPIConfigFromSource(source, path)
+		if err != nil {
+			logger.Warnf("reload api config after watch interruption {key:%s} = error{%s}", path, err)
+			if !waitForAPIConfigWatchRetry(source) {
+				return
+			}
+			continue
+		}
+		reconcileAPIConfigResources(previousResources, apiConfigResourcesSnapshot())
+		revision = nextRevision
+	}
+}
+
+func waitForAPIConfigListener(source apiConfigSource, ready <-chan struct{}) bool {
+	if ready == nil {
+		return true
+	}
+	select {
+	case <-source.Done():
+		logger.Warnf("client stopped before api config listener became ready")
+		return false
+	case <-ready:
+		return true
+	}
+}
+
+func apiConfigSourceStopped(source apiConfigSource) bool {
+	select {
+	case <-source.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func waitForAPIConfigWatchRetry(source apiConfigSource) bool {
+	timer := time.NewTimer(apiConfigWatchRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-source.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func apiConfigResourcesSnapshot() []Resource {
+	lock.RLock()
+	defer lock.RUnlock()
+	if apiConfig == nil || len(apiConfig.Resources) == 0 {
+		return nil
+	}
+	resources := make([]Resource, len(apiConfig.Resources))
+	copy(resources, apiConfig.Resources)
+	return resources
+}
+
+func reconcileAPIConfigResources(previousResources, currentResources []Resource) {
+	listenerGateMu.Lock()
+	currentListener := listener
+	listenerGateMu.Unlock()
+	if currentListener == nil {
+		logger.Warnf("skip api config runtime reconciliation because no listener is registered")
+		return
+	}
+
+	// Rebuild from the fresh snapshot so a canceled watch cannot leave stale
+	// routes in the runtime, even when it missed several resource mutations.
+	for _, resource := range previousResources {
+		if !currentListener.ResourceDelete(resource) {
+			logger.Warnf("remove stale api resource %q during watch recovery failed", resource.Path)
+		}
+	}
+	for _, resource := range currentResources {
+		if !currentListener.ResourceAdd(resource) {
+			logger.Warnf("add api resource %q during watch recovery failed", resource.Path)
+		}
+	}
 }
 
 func initAPIConfigFromKVList(kList, vList []string) error {
@@ -396,31 +556,34 @@ func initAPIConfigServiceFromKvList(config *APIConfig, kList, vList []string) er
 	return nil
 }
 
-func listenResourceAndMethodEvent(key string) bool {
+func listenResourceAndMethodEvent(source apiConfigSource, key string, revision int64, ready <-chan struct{}) bool {
+	wc, err := source.Watch(key, revision)
+	if err != nil {
+		logger.Warnf("Watch api config {key:%s, revision:%d} = error{%s}", key, revision, err)
+		return false
+	}
+	if !waitForAPIConfigListener(source, ready) {
+		return false
+	}
 	for {
-		wc, err := client.WatchWithPrefix(key)
-		if err != nil {
-			logger.Warnf("Watch api config {key:%s} = error{%s}", key, err)
-			return false
-		}
-
 		select {
-
 		// client stopped
-		case <-client.Done():
+		case <-source.Done():
 			logger.Warnf("client stopped")
 			return false
-		// client ctx stop
-		// handle etcd events
 		case e, ok := <-wc:
 			if !ok {
 				logger.Warnf("watch-chan closed")
 				return false
 			}
 
+			if e.Canceled {
+				logger.Warnf("watch canceled {compact-revision:%d}", e.CompactRevision)
+				return false
+			}
 			if e.Err() != nil {
 				logger.Errorf("watch ERR {err: %s}", e.Err())
-				continue
+				return false
 			}
 			for _, event := range e.Events {
 				switch event.Type {
@@ -612,7 +775,13 @@ func getCheckRatelimitRegexp() *regexp.Regexp {
 
 // RegisterConfigListener register APIConfigListener
 func RegisterConfigListener(li APIConfigResourceListener) {
+	listenerGateMu.Lock()
 	listener = li
+	if listenerGate != nil {
+		close(listenerGate)
+		listenerGate = nil
+	}
+	listenerGateMu.Unlock()
 }
 
 // UnmarshalYAML Resource custom UnmarshalYAML

@@ -6,6 +6,9 @@
 
 For backend API documentation, please refer to [API.md](../admin/API.md).
 
+For the initial schema-driven route-binding lifecycle (draft, preview, publish,
+history, and rollback), see [ROUTE_BINDING.md](ROUTE_BINDING.md).
+
 ## Deployment Documentation
 
 ### Start Using Docker

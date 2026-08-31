@@ -83,6 +83,19 @@ func Routers() *gin.Engine {
 		taR.PUT("/config/api/resource/method", configInfo.ModifyMethodInfo)
 		taR.DELETE("/config/api/resource/method", configInfo.DeleteMethodInfo)
 
+		// Schema-driven route bindings use a separate control-plane namespace.
+		// Only the publish handler writes the legacy resources/method keys watched
+		// by running Pixiu instances.
+		taR.GET("/config/api/route-binding/schema", configInfo.GetRouteBindingSchema)
+		taR.GET("/config/api/route-binding/list", configInfo.ListRouteBindings)
+		taR.GET("/config/api/route-binding/detail", configInfo.GetRouteBindingDetail)
+		taR.POST("/config/api/route-binding", configInfo.SaveRouteBindingDraft)
+		taR.POST("/config/api/route-binding/preview", configInfo.PreviewRouteBinding)
+		taR.PUT("/config/api/route-binding/publish", configInfo.PublishRouteBinding)
+		taR.GET("/config/api/route-binding/history", configInfo.GetRouteBindingHistory)
+		taR.POST("/config/api/route-binding/rollback", configInfo.RollbackRouteBinding)
+		taR.DELETE("/config/api/route-binding", configInfo.DeleteRouteBindingDraft)
+
 		taR.GET("/config/api/opa/policy", opa.GetOPAPolicy)
 		taR.PUT("/config/api/opa/policy", opa.PutOPAPolicy)
 		taR.DELETE("/config/api/opa/policy", opa.DeleteOPAPolicy)

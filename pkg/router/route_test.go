@@ -18,6 +18,7 @@
 package router
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -114,6 +115,39 @@ func TestMatchMethod(t *testing.T) {
 	assert.True(t, ok)
 	assert.NotNil(t, m)
 	assert.Equal(t, m.URLPattern, "/vought/:id/supe/:name")
+}
+
+func TestRouteRecoveryConcurrentWithMatch(t *testing.T) {
+	rt := NewRoute()
+	method := getMockMethod(constant.Get)
+	api := API{URLPattern: "/users/:id", Method: method}
+	if err := rt.PutAPI(api); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 10000; i++ {
+			rt.MatchAPI("/users/42", constant.Get)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 1000; i++ {
+			rt.DeleteNode("/users/:id")
+			if err := rt.PutAPI(api); err != nil {
+				t.Errorf("restore route: %v", err)
+				return
+			}
+		}
+	}()
+	close(start)
+	wg.Wait()
 }
 
 //

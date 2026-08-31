@@ -7,6 +7,9 @@
 
 后端API接口文档请参考 [API.md](../admin/API_CN.md)。
 
+Schema-driven 路由模型的最小闭环（草稿、预览、发布、历史和回滚）请参阅
+[ROUTE_BINDING.md](ROUTE_BINDING.md)。
+
 ## 部署文档
 
 ### 使用 Docker 启动

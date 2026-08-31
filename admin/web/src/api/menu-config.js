@@ -23,6 +23,11 @@ export const menuList = [{
     componentName: '/Overview'
   },
   {
+    name: '路由模型',
+    id: 'RouteBinding',
+    componentName: '/RouteBinding'
+  },
+  {
     name: '插件配置',
     id: 'Plug',
     componentName: 'Plug'

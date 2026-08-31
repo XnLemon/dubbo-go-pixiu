@@ -1,0 +1,321 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to you under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package schema
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"unicode"
+)
+
+var routeParameterNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// RegisterBuiltinSchemas installs only the Admin-facing route binding. Legacy
+// Resource and Method are compiler outputs rather than form objects.
+func RegisterBuiltinSchemas(registry *Registry) error {
+	if registry == nil {
+		return fmt.Errorf("admin object schema registry is nil")
+	}
+	if err := registry.Register(adminRouteBindingSchema()); err != nil {
+		return err
+	}
+	return registry.RegisterValidator(KindAdminRouteBinding, validateAdminRouteBinding)
+}
+
+func adminRouteBindingSchema() ObjectSchema {
+	return ObjectSchema{
+		Kind:        KindAdminRouteBinding,
+		Description: "High-level HTTP entry to Dubbo invocation binding",
+		Fields: map[string]*FieldSchema{
+			"entry": {
+				Type:     FieldTypeObject,
+				Required: true,
+				Properties: map[string]*FieldSchema{
+					"protocol": {
+						Type:    FieldTypeString,
+						Default: "http",
+						Enum:    []any{"http"},
+						UI:      UIHints{Component: "select", Order: 10},
+					},
+					"path": {
+						Type:        FieldTypeString,
+						Required:    true,
+						Pattern:     `^/`,
+						Description: "HTTP path pattern exposed by Pixiu",
+						UI:          UIHints{Component: "text", Order: 20, Placeholder: "/api/v1/users/:id"},
+					},
+					"method": {
+						Type:     FieldTypeString,
+						Required: true,
+						Enum:     []any{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"},
+						UI:       UIHints{Component: "select", Order: 30},
+					},
+				},
+				UI: UIHints{Group: "entry", Order: 10},
+			},
+			"target": {
+				Type:     FieldTypeObject,
+				Required: true,
+				Properties: map[string]*FieldSchema{
+					"protocol": {
+						Type:    FieldTypeString,
+						Default: "dubbo",
+						Enum:    []any{"dubbo"},
+						UI:      UIHints{Component: "select", Order: 10},
+					},
+					"application": {
+						Type:        FieldTypeString,
+						Required:    true,
+						Description: "Dubbo application metadata retained for legacy and registry-adapter integration",
+						UI:          UIHints{Component: "text", Order: 20},
+					},
+					"interface": {
+						Type:     FieldTypeString,
+						Required: true,
+						UI:       UIHints{Component: "text", Order: 30},
+					},
+					"method": {
+						Type:     FieldTypeString,
+						Required: true,
+						UI:       UIHints{Component: "text", Order: 40},
+					},
+					"version": {Type: FieldTypeString, UI: UIHints{Component: "text", Order: 50}},
+					"group":   {Type: FieldTypeString, UI: UIHints{Component: "text", Order: 60}},
+					"cluster": {
+						Type:        FieldTypeString,
+						Required:    true,
+						Description: "legacy cluster metadata; route-specific provider selection is deferred",
+						UI:          UIHints{Component: "text", Order: 70},
+					},
+				},
+				UI: UIHints{Group: "target", Order: 20},
+			},
+			"params": {
+				Type:        FieldTypeArray,
+				Default:     []any{},
+				Description: "Ordered HTTP source to Dubbo argument mappings",
+				Items: &FieldSchema{
+					Type: FieldTypeObject,
+					Properties: map[string]*FieldSchema{
+						"from": {
+							Type:        FieldTypeString,
+							Required:    true,
+							Pattern:     `^((uri|queryStrings|headers)\.[A-Za-z0-9_-]+|requestBody\.[A-Za-z0-9_.-]+)$`,
+							Description: "legacy mappingParams.name",
+						},
+						"to": {
+							Type:        FieldTypeInteger,
+							Required:    true,
+							Minimum:     floatPointer(0),
+							Description: "zero-based Dubbo argument index",
+						},
+						"type": {
+							Type:        FieldTypeString,
+							Required:    true,
+							Description: "legacy mapType and parameterTypes entry",
+						},
+					},
+				},
+				UI: UIHints{Component: "parameter-binding-table", Group: "params", Order: 30},
+			},
+			"timeout": {
+				Type:        FieldTypeString,
+				Default:     defaultRouteTimeout.String(),
+				Description: "request timeout applied to the generated Resource and Method",
+				UI:          UIHints{Component: "duration", Group: "runtime", Order: 40},
+			},
+			"publish": {
+				Type:    FieldTypeObject,
+				Default: map[string]any{},
+				Properties: map[string]*FieldSchema{
+					"mode": {
+						Type:    FieldTypeString,
+						Default: "draft",
+						Enum:    []any{"draft", "published"},
+						UI:      UIHints{Component: "select", Order: 10},
+					},
+					"validate": {
+						Type:    FieldTypeBoolean,
+						Default: true,
+						UI:      UIHints{Component: "switch", Order: 20},
+					},
+				},
+				UI: UIHints{Group: "publish", Order: 50, Advanced: true},
+			},
+			"extensions": {
+				Type:    FieldTypeObject,
+				Default: map[string]any{},
+				UI:      UIHints{Component: "extension-fields", Group: "advanced", Order: 60, Advanced: true},
+			},
+		},
+	}
+}
+
+func validateAdminRouteBinding(object AdminObject) []ValidationIssue {
+	issues := make([]ValidationIssue, 0)
+	if timeout, ok := object.Spec["timeout"].(string); ok {
+		if _, err := parsePositiveDuration(timeout); err != nil {
+			issues = append(issues, issue("spec.timeout", "duration", err.Error()))
+		}
+	}
+
+	entry, _ := object.Spec["entry"].(map[string]any)
+	path, _ := entry["path"].(string)
+	pathParameters, pathIssues := validateRoutePath(path)
+	issues = append(issues, pathIssues...)
+	target, _ := object.Spec["target"].(map[string]any)
+	for _, field := range []string{"application", "interface", "method", "version", "group", "cluster"} {
+		validateExactString(&issues, "spec.target."+field, target[field])
+	}
+
+	params, ok := object.Spec["params"].([]any)
+	if !ok {
+		return issues
+	}
+
+	seenIndexes := make(map[int]int, len(params))
+	for index, rawParam := range params {
+		param, ok := rawParam.(map[string]any)
+		if !ok {
+			continue
+		}
+		toNumber, ok := numericValue(param["to"])
+		if !ok {
+			continue
+		}
+		to := int(toNumber)
+		if previous, exists := seenIndexes[to]; exists {
+			issues = append(issues, issue(
+				fmt.Sprintf("spec.params[%d].to", index),
+				"duplicate",
+				fmt.Sprintf("duplicates params[%d] argument index %d", previous, to),
+			))
+		} else {
+			seenIndexes[to] = index
+		}
+
+		if paramType, ok := param["type"].(string); ok {
+			paramTypePath := fmt.Sprintf("spec.params[%d].type", index)
+			validateExactString(&issues, paramTypePath, paramType)
+			if !isSupportedParamType(paramType) {
+				issues = append(issues, issue(
+					paramTypePath,
+					"unsupported",
+					fmt.Sprintf("unsupported scalar Dubbo map type %q", paramType),
+				))
+			}
+		}
+
+		if from, ok := param["from"].(string); ok {
+			validateURIParameter(&issues, pathParameters, from, index)
+		}
+	}
+
+	for expected := 0; expected < len(params); expected++ {
+		if _, exists := seenIndexes[expected]; !exists {
+			issues = append(issues, issue(
+				"spec.params",
+				"non_contiguous",
+				fmt.Sprintf("argument indexes must be contiguous from 0; index %d is missing", expected),
+			))
+		}
+	}
+	return issues
+}
+
+func validateExactString(issues *[]ValidationIssue, path string, value any) {
+	text, ok := value.(string)
+	if !ok || text == "" || strings.TrimSpace(text) == text {
+		return
+	}
+	*issues = append(*issues, issue(path, "whitespace", "must not contain leading or trailing whitespace"))
+}
+
+func validateURIParameter(issues *[]ValidationIssue, pathParameters map[string]struct{}, from string, index int) {
+	source, name, found := strings.Cut(from, ".")
+	if !found || source != "uri" {
+		return
+	}
+	path := fmt.Sprintf("spec.params[%d].from", index)
+	if strings.TrimSpace(name) == "" || strings.Contains(name, ".") {
+		*issues = append(*issues, issue(
+			path,
+			"uri_source",
+			"URI mappings must use uri.<path-parameter>",
+		))
+		return
+	}
+	if _, exists := pathParameters[name]; !exists {
+		*issues = append(*issues, issue(
+			path,
+			"uri_parameter_not_found",
+			fmt.Sprintf("path does not declare URI parameter %q", name),
+		))
+	}
+}
+
+func validateRoutePath(path string) (map[string]struct{}, []ValidationIssue) {
+	parameters := make(map[string]struct{})
+	issues := make([]ValidationIssue, 0)
+	if strings.TrimSpace(path) != path || strings.IndexFunc(path, unicode.IsSpace) >= 0 {
+		issues = append(issues, issue("spec.entry.path", "whitespace", "path must not contain whitespace"))
+	}
+	if strings.ContainsAny(path, "?#") {
+		issues = append(issues, issue("spec.entry.path", "path_only", "path must not contain a query or fragment"))
+	}
+	for _, segment := range strings.Split(strings.Trim(path, "/"), "/") {
+		if !strings.HasPrefix(segment, ":") {
+			continue
+		}
+		name := strings.TrimPrefix(segment, ":")
+		if !routeParameterNamePattern.MatchString(name) {
+			issues = append(issues, issue(
+				"spec.entry.path",
+				"path_parameter",
+				fmt.Sprintf("URI parameter %q must contain only letters, numbers, '_' or '-'", name),
+			))
+			continue
+		}
+		if _, exists := parameters[name]; exists {
+			issues = append(issues, issue(
+				"spec.entry.path",
+				"duplicate_path_parameter",
+				fmt.Sprintf("URI parameter %q is declared more than once", name),
+			))
+			continue
+		}
+		parameters[name] = struct{}{}
+	}
+	return parameters, issues
+}
+
+func isSupportedParamType(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "string", "char", "short", "int", "long", "float", "double", "boolean", "date", "object",
+		"java.lang.String", "java.lang.Character", "java.lang.Short", "java.lang.Integer", "java.lang.Long",
+		"java.lang.Float", "java.lang.Double", "java.lang.Boolean", "java.lang.Object", "java.util.Date":
+		return true
+	default:
+		return false
+	}
+}
+
+func floatPointer(value float64) *float64 {
+	return &value
+}

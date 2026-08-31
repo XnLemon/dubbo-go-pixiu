@@ -255,8 +255,8 @@ func (rt *Route) MatchAPI(fullPath string, httpverb string) (*API, bool) {
 
 // DeleteNode delete node by fullPath
 func (rt *Route) DeleteNode(fullPath string) bool {
-	rt.lock.RLock()
-	defer rt.lock.RUnlock()
+	rt.lock.Lock()
+	defer rt.lock.Unlock()
 	methodList := [8]string{"ANY", "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 	for _, v := range methodList {
 		key := getTrieKey(v, fullPath, false)
@@ -270,8 +270,8 @@ func (rt *Route) DeleteAPI(fullPath string, httpverb string) bool {
 	lowerCasePath := strings.ToLower(fullPath)
 	key := getTrieKey(httpverb, lowerCasePath, false)
 	if _, found := rt.getNode(key); found {
-		rt.lock.RLock()
-		defer rt.lock.RUnlock()
+		rt.lock.Lock()
+		defer rt.lock.Unlock()
 		_, _ = rt.tree.Remove(key)
 		return true
 	}

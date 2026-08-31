@@ -95,10 +95,20 @@ func (l *LocalMemoryAPIDiscoveryService) ClearAPI() error {
 // RemoveAPIByPath remove all api belonged to path
 func (l *LocalMemoryAPIDiscoveryService) RemoveAPIByPath(deleted config.Resource) error {
 	_, groupPath := getDefaultPath()
-	fullPath := getFullPath(groupPath, deleted.Path)
-
-	l.router.DeleteNode(fullPath)
+	deleteAPIResourceTree(l.router, groupPath, deleted)
 	return nil
+}
+
+func deleteAPIResourceTree(route *router.Route, groupPath string, resource config.Resource) {
+	fullPath := getFullPath(groupPath, resource.Path)
+	childGroupPath := resource.Path
+	if childGroupPath == constant.PathSlash {
+		childGroupPath = ""
+	}
+	for _, child := range resource.Resources {
+		deleteAPIResourceTree(route, childGroupPath, child)
+	}
+	route.DeleteNode(fullPath)
 }
 
 func (l *LocalMemoryAPIDiscoveryService) RemoveAPIByIntance(api router.API) error {
@@ -173,12 +183,16 @@ func (l *LocalMemoryAPIDiscoveryService) MethodDelete(res config.Resource, metho
 
 // InitAPIsFromConfig inits the router from API config and to local cache
 func (l *LocalMemoryAPIDiscoveryService) InitAPIsFromConfig(apiConfig config.APIConfig) error {
-	if len(apiConfig.Resources) == 0 {
-		return nil
+	if len(apiConfig.Resources) > 0 {
+		if err := loadAPIFromResource("", apiConfig.Resources, nil, l); err != nil {
+			return err
+		}
 	}
-	// register config change listener
+	// LoadAPIConfig establishes a revision-aware watch before returning but
+	// gates event delivery until the snapshot has been installed here. This
+	// avoids both a nil listener on an empty start and duplicate router writes.
 	config.RegisterConfigListener(l)
-	return loadAPIFromResource("", apiConfig.Resources, nil, l)
+	return nil
 }
 
 func loadAPIFromResource(parentPath string, resources []config.Resource, parentHeaders map[string]string, localSrv APIDiscoveryService) error {
