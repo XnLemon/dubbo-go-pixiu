@@ -71,7 +71,7 @@ export const routeBindingApi = {
       body: mutationBody(object, expectedRevision),
     }),
   remove: (name: string, expectedRevision = 0) =>
-    request<string>(
+    request<RouteBindingPublishResult>(
       `${pixiuAdminApi.routeBindings.remove}${query({ name, expectedRevision: expectedRevision || undefined })}`,
       { method: 'DELETE' },
     ),
@@ -97,6 +97,4 @@ export const routeBindingApi = {
     request<RouteBindingPublishStatus>(`${pixiuAdminApi.routeBindings.status}${query({ name })}`),
   diff: (name: string) =>
     request<RouteBindingDiff>(`${pixiuAdminApi.routeBindings.diff}${query({ name })}`),
-  publishStatus: () =>
-    request<RouteBindingPublishStatus>(pixiuAdminApi.routeBindings.publishStatus),
 }

@@ -189,11 +189,11 @@ func ModifyRouteBinding(c *gin.Context) {
 	c.JSON(http.StatusOK, adminconfig.WithRet(binding))
 }
 
-// DeleteRouteBinding removes a draft. If the binding is currently published,
-// the next atomic publish interprets its absence as a route deletion.
+// DeleteRouteBinding removes one route draft and its published runtime state
+// in one atomic transaction after the caller confirms the deletion.
 //
 // @Tags Config
-// @Summary delete API route binding draft
+// @Summary delete and publish one API route binding
 // @Produce application/json
 // @Param name query string true "Route binding name"
 // @Param expectedRevision query int false "Draft key mod revision"
@@ -211,11 +211,12 @@ func DeleteRouteBinding(c *gin.Context) {
 		writeRouteBindingError(c, err)
 		return
 	}
-	if err := store.DeleteDraft(c.Request.Context(), name, expectedRevision); err != nil {
+	result, err := store.DeleteAndPublish(c.Request.Context(), name, expectedRevision)
+	if err != nil {
 		writeRouteBindingError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, adminconfig.WithRet("Success"))
+	c.JSON(http.StatusOK, adminconfig.WithRet(result))
 }
 
 // ValidateRouteBinding validates an object and returns schema defaults without
@@ -381,28 +382,6 @@ func GetRouteBindingDiff(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, adminconfig.WithRet(diff))
-}
-
-// GetRouteBindingPublishStatus returns the draft/published marker revisions
-// used by the legacy full-snapshot publish contract.
-//
-// @Tags Config
-// @Summary get API route binding publish status
-// @Produce application/json
-// @Success 200 {object} string
-// @Router /config/api/route/publish/status [get]
-func GetRouteBindingPublishStatus(c *gin.Context) {
-	store, err := logic.NewAdminRouteBindingStore()
-	if err != nil {
-		writeRouteBindingError(c, err)
-		return
-	}
-	status, err := store.PublishStatus(c.Request.Context())
-	if err != nil {
-		writeRouteBindingError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, adminconfig.WithRet(status))
 }
 
 func decodeRouteBindingRequest(c *gin.Context) (schema.AdminObject, int64, error) {

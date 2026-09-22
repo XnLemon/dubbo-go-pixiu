@@ -417,7 +417,9 @@ export function RouteBindingEditor({
       setPublished(false)
       setNotice({ tone: 'success', text: isEnglish ? 'Draft saved.' : '草稿已保存。' })
       try {
-        setPublishStatus(await routeBindingApi.status(normalized.metadata.name))
+        const nextStatus = await routeBindingApi.status(normalized.metadata.name)
+        setPublishStatus(nextStatus)
+        setPublished(Boolean(nextStatus.publishedExists && !nextStatus.dirty))
       } catch {
         // The draft was saved successfully. A status refresh is best effort.
       }

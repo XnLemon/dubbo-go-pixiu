@@ -67,10 +67,11 @@ type routeBindingKV interface {
 // are stable runtime identities used by Pixiu's legacy etcd watcher; they are
 // not part of the user-editable AdminRouteBinding object.
 type RouteBinding struct {
-	Object     schema.AdminObject `json:"object"`
-	ResourceID int                `json:"resourceId"`
-	MethodID   int                `json:"methodId"`
-	Revision   int64              `json:"revision"`
+	Object        schema.AdminObject         `json:"object"`
+	ResourceID    int                        `json:"resourceId"`
+	MethodID      int                        `json:"methodId"`
+	Revision      int64                      `json:"revision"`
+	PublishStatus *RouteBindingPublishStatus `json:"publishStatus,omitempty"`
 }
 
 // RouteBindingPublishResult describes one atomic publish transaction.
@@ -186,11 +187,46 @@ func (s *RouteBindingStore) List(ctx context.Context, unpublished bool) ([]Route
 	if err != nil {
 		return nil, err
 	}
+	var statuses map[string]RouteBindingPublishStatus
+	if unpublished {
+		publishedEntries, err := s.listEntries(ctx, s.bindingPrefix(false))
+		if err != nil {
+			return nil, err
+		}
+		statuses = routeBindingStatuses(entries, publishedEntries)
+	}
 	result := make([]RouteBinding, 0, len(entries))
 	for _, entry := range entries {
-		result = append(result, routeBindingView(entry))
+		view := routeBindingView(entry)
+		if status, exists := statuses[entry.record.Object.Metadata.Name]; exists {
+			view.PublishStatus = &status
+		}
+		result = append(result, view)
 	}
 	return result, nil
+}
+
+func routeBindingStatuses(draftEntries, publishedEntries []routeBindingEntry) map[string]RouteBindingPublishStatus {
+	publishedByName := make(map[string]routeBindingEntry, len(publishedEntries))
+	for _, entry := range publishedEntries {
+		publishedByName[entry.record.Object.Metadata.Name] = entry
+	}
+
+	statuses := make(map[string]RouteBindingPublishStatus, len(draftEntries))
+	for _, draft := range draftEntries {
+		name := draft.record.Object.Metadata.Name
+		published, publishedExists := publishedByName[name]
+		status := RouteBindingPublishStatus{
+			Name:              name,
+			DraftRevision:     draft.revision,
+			DraftExists:       true,
+			PublishedExists:   publishedExists,
+			PublishedRevision: published.revision,
+			Dirty:             !publishedExists || !reflect.DeepEqual(draft.record.Object, published.record.Object),
+		}
+		statuses[name] = status
+	}
+	return statuses
 }
 
 // Get returns one high-level route binding from either the draft or published
@@ -352,7 +388,6 @@ func (s *RouteBindingStore) commitDraft(ctx context.Context, name, draftPrefix s
 	}
 	operations := []clientv3.Op{
 		clientv3.OpPut(s.bindingKey(draftPrefix, name), string(value)),
-		clientv3.OpPut(s.draftRevisionKey(), strconv.FormatInt(time.Now().UnixNano(), 10)),
 	}
 	transaction := s.kv.Txn(ctx)
 	if len(comparisons) > 0 {
@@ -371,74 +406,67 @@ func (s *RouteBindingStore) commitDraft(ctx context.Context, name, draftPrefix s
 	return fmt.Errorf("%w: %s", ErrRouteBindingConflict, name)
 }
 
-// DeleteDraft removes a draft. If only a published binding exists, the
-// deletion is still recorded by advancing the draft revision; the next
-// PublishAll transaction will remove that published route atomically.
-func (s *RouteBindingStore) DeleteDraft(ctx context.Context, name string, expectedRevision int64) error {
+// DeleteAndPublish removes one route draft and its published runtime state in
+// the same etcd transaction. This keeps the delete flow atomic for callers:
+// there is no intermediate state where the draft is gone but the route still
+// remains active in Pixiu.
+func (s *RouteBindingStore) DeleteAndPublish(ctx context.Context, name string, expectedRevision int64) (RouteBindingPublishResult, error) {
 	ctx = routeBindingContext(ctx)
 	if expectedRevision < 0 {
-		return errors.New("expected revision must not be negative")
+		return RouteBindingPublishResult{}, errors.New("expected revision must not be negative")
 	}
 	name, err := normalizeRouteBindingName(name)
 	if err != nil {
-		return err
+		return RouteBindingPublishResult{}, err
 	}
-	draftPrefix := s.bindingPrefix(true)
-	_, exists, revision, err := s.getEntry(ctx, draftPrefix, name)
+	state, err := s.readPublishState(ctx, name)
 	if err != nil {
-		return err
+		return RouteBindingPublishResult{}, err
 	}
-	_, publishedExists, _, err := s.getEntry(ctx, s.bindingPrefix(false), name)
+	if expectedRevision > 0 && (!state.draftExists || state.draftRevision != expectedRevision) {
+		return RouteBindingPublishResult{}, fmt.Errorf("%w: %s", ErrRouteBindingConflict, name)
+	}
+	comparisons, err := s.buildPublishComparisons(ctx, state)
 	if err != nil {
-		return err
+		return RouteBindingPublishResult{}, err
 	}
-	if !exists && !publishedExists {
-		return fmt.Errorf("%w: %s", ErrRouteBindingNotFound, name)
+	operations := make([]clientv3.Op, 0, 4)
+	if state.draftExists {
+		operations = append(operations, clientv3.OpDelete(s.bindingKey(state.draftPrefix, name)))
 	}
-	if expectedRevision > 0 && (!exists || revision != expectedRevision) {
-		return fmt.Errorf("%w: %s", ErrRouteBindingConflict, name)
-	}
-	draftMarkerRevision, draftMarkerExists, err := s.markerRevision(ctx, s.draftRevisionKey())
-	if err != nil {
-		return err
-	}
-
-	comparisons := make([]clientv3.Cmp, 0, 2)
-	if exists {
-		observedRevision := revision
-		if expectedRevision > 0 {
-			observedRevision = expectedRevision
+	deletedCount := 0
+	if state.publishedExists {
+		if state.published.record.ResourceID <= 0 || state.published.record.MethodID <= 0 {
+			return RouteBindingPublishResult{}, fmt.Errorf("published route binding %q has invalid runtime identity", name)
 		}
-		comparisons = append(comparisons, clientv3.Compare(clientv3.ModRevision(s.bindingKey(draftPrefix, name)), "=", observedRevision))
+		operations = append(operations,
+			clientv3.OpDelete(s.runtimeResourceKey(state.published.record.ResourceID), clientv3.WithPrefix()),
+			clientv3.OpDelete(s.bindingKey(state.publishedPrefix, name)),
+		)
+		deletedCount = 1
 	}
-	if draftMarkerExists {
-		comparisons = append(comparisons, clientv3.Compare(clientv3.ModRevision(s.draftRevisionKey()), "=", draftMarkerRevision))
-	} else {
-		comparisons = append(comparisons, clientv3.Compare(clientv3.CreateRevision(s.draftRevisionKey()), "=", 0))
-	}
-	operations := make([]clientv3.Op, 0, 2)
-	if exists {
-		operations = append(operations, clientv3.OpDelete(s.bindingKey(draftPrefix, name)))
-	}
-	operations = append(operations, clientv3.OpPut(s.draftRevisionKey(), strconv.FormatInt(time.Now().UnixNano(), 10)))
-	transaction := s.kv.Txn(ctx)
-	if len(comparisons) > 0 {
-		transaction = transaction.If(comparisons...)
-	}
-	response, err := transaction.Then(operations...).Commit()
+	operations = append(operations,
+		clientv3.OpPut(s.publishedRevisionKey(), strconv.FormatInt(time.Now().UnixNano(), 10)))
+	response, err := s.kv.Txn(ctx).If(comparisons...).Then(operations...).Commit()
 	if err != nil {
-		return fmt.Errorf("delete route binding %q: %w", name, err)
+		return RouteBindingPublishResult{}, fmt.Errorf("delete route binding %q: %w", name, err)
 	}
-	if len(comparisons) > 0 && !response.Succeeded {
-		return fmt.Errorf("%w: %s", ErrRouteBindingConflict, name)
+	if !response.Succeeded {
+		return RouteBindingPublishResult{}, fmt.Errorf("%w: %s", ErrRouteBindingPublishConflict, name)
 	}
-	return nil
+	return RouteBindingPublishResult{
+		Name:              name,
+		Revision:          response.Header.Revision,
+		DraftRevision:     state.draftRevision,
+		PublishedRevision: 0,
+		DeletedCount:      deletedCount,
+	}, nil
 }
 
 // Publish publishes exactly one route binding. The generated legacy resource
-// and method, the published high-level binding, and the publish marker are
-// written or deleted in one etcd transaction. Other routes' draft and
-// published values are left untouched.
+// and method, the published high-level binding, and the internal generation
+// guard are written or deleted in one etcd transaction. Other routes' draft
+// and published values are left untouched.
 func (s *RouteBindingStore) Publish(ctx context.Context, name string, expectedDraftRevision int64) (RouteBindingPublishResult, error) {
 	ctx = routeBindingContext(ctx)
 	if expectedDraftRevision < 0 {
@@ -473,7 +501,6 @@ func (s *RouteBindingStore) Publish(ctx context.Context, name string, expectedDr
 	}
 	operations = append(operations,
 		clientv3.OpPut(s.publishedRevisionKey(), strconv.FormatInt(time.Now().UnixNano(), 10)))
-
 	response, err := s.kv.Txn(ctx).If(comparisons...).Then(operations...).Commit()
 	if err != nil {
 		return RouteBindingPublishResult{}, fmt.Errorf("publish route binding %q: %w", name, err)
@@ -556,6 +583,13 @@ func (s *RouteBindingStore) buildPublishComparisons(ctx context.Context, state r
 		// expectedDraftRevision. This closes the read/modify/write race.
 		comparisons = append(comparisons,
 			clientv3.Compare(clientv3.ModRevision(s.bindingKey(state.draftPrefix, state.draft.record.Object.Metadata.Name)), "=", state.draftRevision))
+		if state.publishedExists {
+			comparisons = append(comparisons,
+				clientv3.Compare(clientv3.ModRevision(s.bindingKey(state.publishedPrefix, state.published.record.Object.Metadata.Name)), "=", state.publishedRevision))
+		} else {
+			comparisons = append(comparisons,
+				clientv3.Compare(clientv3.CreateRevision(s.bindingKey(state.publishedPrefix, state.draft.record.Object.Metadata.Name)), "=", 0))
+		}
 	} else {
 		comparisons = append(comparisons,
 			clientv3.Compare(clientv3.ModRevision(s.bindingKey(state.publishedPrefix, state.published.record.Object.Metadata.Name)), "=", state.publishedRevision))
@@ -567,10 +601,10 @@ func (s *RouteBindingStore) buildPublishComparisons(ctx context.Context, state r
 	if publishedMarkerExists {
 		comparisons = append(comparisons,
 			clientv3.Compare(clientv3.ModRevision(s.publishedRevisionKey()), "=", publishedMarkerRevision))
-		return comparisons, nil
+	} else {
+		comparisons = append(comparisons,
+			clientv3.Compare(clientv3.CreateRevision(s.publishedRevisionKey()), "=", 0))
 	}
-	comparisons = append(comparisons,
-		clientv3.Compare(clientv3.CreateRevision(s.publishedRevisionKey()), "=", 0))
 	return comparisons, nil
 }
 
@@ -808,83 +842,6 @@ func valueOrNil(value any, exists bool) any {
 	return value
 }
 
-// PublishAll compiles the complete draft snapshot and publishes it with one
-// etcd transaction. The transaction updates the high-level published records,
-// generated legacy resources/methods, stale-route deletions, and the published
-// revision marker together. A draft marker compare prevents a concurrent save
-// or delete from being silently omitted from the snapshot.
-func (s *RouteBindingStore) PublishAll(ctx context.Context, expectedDraftRevision int64) (RouteBindingPublishResult, error) {
-	ctx = routeBindingContext(ctx)
-	if expectedDraftRevision < 0 {
-		return RouteBindingPublishResult{}, errors.New("expected draft revision must not be negative")
-	}
-	draftEntries, err := s.listEntries(ctx, s.bindingPrefix(true))
-	if err != nil {
-		return RouteBindingPublishResult{}, err
-	}
-	publishedEntries, err := s.listEntries(ctx, s.bindingPrefix(false))
-	if err != nil {
-		return RouteBindingPublishResult{}, err
-	}
-
-	draftRevision, draftMarkerExists, err := s.markerRevision(ctx, s.draftRevisionKey())
-	if err != nil {
-		return RouteBindingPublishResult{}, err
-	}
-	if expectedDraftRevision > 0 && (!draftMarkerExists || draftRevision != expectedDraftRevision) {
-		return RouteBindingPublishResult{}, fmt.Errorf("%w: draft revision changed", ErrRouteBindingPublishConflict)
-	}
-
-	compiled, err := s.compileSnapshot(draftEntries)
-	if err != nil {
-		return RouteBindingPublishResult{}, err
-	}
-	operations, publishedCount, deletedCount, err := s.buildPublishOperations(compiled, publishedEntries)
-	if err != nil {
-		return RouteBindingPublishResult{}, err
-	}
-
-	comparisons := make([]clientv3.Cmp, 0, 1)
-	if draftMarkerExists {
-		comparisons = append(comparisons, clientv3.Compare(clientv3.ModRevision(s.draftRevisionKey()), "=", draftRevision))
-	} else {
-		comparisons = append(comparisons, clientv3.Compare(clientv3.CreateRevision(s.draftRevisionKey()), "=", 0))
-	}
-	operations = append(operations,
-		clientv3.OpPut(s.publishedRevisionKey(), strconv.FormatInt(draftRevision, 10)),
-	)
-	response, err := s.kv.Txn(ctx).If(comparisons...).Then(operations...).Commit()
-	if err != nil {
-		return RouteBindingPublishResult{}, fmt.Errorf("publish route bindings: %w", err)
-	}
-	if !response.Succeeded {
-		return RouteBindingPublishResult{}, fmt.Errorf("%w: draft revision changed", ErrRouteBindingPublishConflict)
-	}
-	return RouteBindingPublishResult{
-		Revision:       response.Header.Revision,
-		DraftRevision:  draftRevision,
-		PublishedCount: publishedCount,
-		DeletedCount:   deletedCount,
-	}, nil
-}
-
-// PublishStatus returns the current draft and published marker revisions.
-func (s *RouteBindingStore) PublishStatus(ctx context.Context) (RouteBindingPublishStatus, error) {
-	ctx = routeBindingContext(ctx)
-	draftRevision, _, err := s.markerRevision(ctx, s.draftRevisionKey())
-	if err != nil {
-		return RouteBindingPublishStatus{}, err
-	}
-	publishedRevision, _, err := s.markerRevision(ctx, s.publishedRevisionKey())
-	if err != nil {
-		return RouteBindingPublishStatus{}, err
-	}
-	return RouteBindingPublishStatus{
-		DraftRevision:     draftRevision,
-		PublishedRevision: publishedRevision,
-	}, nil
-}
-
 type compiledRouteEntry struct {
 	entry  routeBindingEntry
 	object schema.AdminObject
@@ -921,127 +878,6 @@ func (s *RouteBindingStore) compileSnapshot(entries []routeBindingEntry) ([]comp
 		result = append(result, compiledRouteEntry{entry: entry, object: normalized, legacy: legacy})
 	}
 	return result, nil
-}
-
-func (s *RouteBindingStore) buildPublishOperations(compiled []compiledRouteEntry, published []routeBindingEntry) ([]clientv3.Op, int, int, error) {
-	oldByName, _, err := indexPublishedRoutes(published)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	newByName, newIDs := indexCompiledRoutes(compiled)
-	operations := make([]clientv3.Op, 0, len(compiled)*3+len(published)*2)
-	deletedOperations, deletedCount, err := s.buildDeletedPublishOperations(oldByName, newByName, newIDs)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	operations = append(operations, deletedOperations...)
-	compiledOperations, err := s.buildCompiledPublishOperations(compiled, oldByName)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	operations = append(operations, compiledOperations...)
-	return operations, len(compiled), deletedCount, nil
-}
-
-func indexPublishedRoutes(published []routeBindingEntry) (map[string]routeBindingEntry, map[int]string, error) {
-	oldByName := make(map[string]routeBindingEntry, len(published))
-	oldIDs := make(map[int]string, len(published))
-	for _, entry := range published {
-		if entry.record.ResourceID <= 0 || entry.record.MethodID <= 0 {
-			return nil, nil, fmt.Errorf("published route binding %q has invalid runtime identity", entry.record.Object.Metadata.Name)
-		}
-		name := entry.record.Object.Metadata.Name
-		oldByName[name] = entry
-		if previous, exists := oldIDs[entry.record.ResourceID]; exists && previous != name {
-			return nil, nil, fmt.Errorf("published route bindings %q and %q share runtime resource id %d", previous, name, entry.record.ResourceID)
-		}
-		oldIDs[entry.record.ResourceID] = name
-	}
-	return oldByName, oldIDs, nil
-}
-
-func indexCompiledRoutes(compiled []compiledRouteEntry) (map[string]compiledRouteEntry, map[int]string) {
-	newByName := make(map[string]compiledRouteEntry, len(compiled))
-	newIDs := make(map[int]string, len(compiled))
-	for _, entry := range compiled {
-		name := entry.object.Metadata.Name
-		newByName[name] = entry
-		newIDs[entry.legacy.Resource.ID] = name
-	}
-	return newByName, newIDs
-}
-
-func (s *RouteBindingStore) buildDeletedPublishOperations(
-	oldByName map[string]routeBindingEntry,
-	newByName map[string]compiledRouteEntry,
-	newIDs map[int]string,
-) ([]clientv3.Op, int, error) {
-	operations := make([]clientv3.Op, 0, len(oldByName)*2)
-	deletedCount := 0
-	for name, old := range oldByName {
-		_, exists := newByName[name]
-		if exists {
-			continue
-		}
-		if owner, reused := newIDs[old.record.ResourceID]; reused {
-			return nil, 0, fmt.Errorf("cannot delete published route binding %q because runtime resource id %d is reused by %q", name, old.record.ResourceID, owner)
-		}
-		operations = append(operations,
-			clientv3.OpDelete(s.runtimeResourceKey(old.record.ResourceID), clientv3.WithPrefix()),
-			clientv3.OpDelete(s.bindingKey(s.bindingPrefix(false), name)),
-		)
-		deletedCount++
-	}
-	return operations, deletedCount, nil
-}
-
-func (s *RouteBindingStore) buildCompiledPublishOperations(
-	compiled []compiledRouteEntry,
-	oldByName map[string]routeBindingEntry,
-) ([]clientv3.Op, error) {
-	operations := make([]clientv3.Op, 0, len(compiled)*3)
-	for _, entry := range compiled {
-		name := entry.object.Metadata.Name
-		old, existed := oldByName[name]
-		// The old identity is deleted before writing the new identity when a
-		// route keeps its name but changes its runtime identity.
-		operations = append(operations, s.runtimeIdentityReplacementOperations(old, existed, entry.legacy)...)
-		resourceValue, methodValue, err := marshalCompiledRuntimeRoute(entry.legacy)
-		if err != nil {
-			return nil, fmt.Errorf("encode route binding %q for runtime: %w", name, err)
-		}
-		recordValue, err := json.Marshal(routeBindingRecord{
-			Object:     entry.object,
-			ResourceID: entry.legacy.Resource.ID,
-			MethodID:   entry.legacy.Method.ID,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("encode published route binding %q: %w", name, err)
-		}
-		operations = append(operations,
-			clientv3.OpPut(s.runtimeResourceKey(entry.legacy.Resource.ID), string(resourceValue)),
-			clientv3.OpPut(s.runtimeMethodKey(entry.legacy.Resource.ID, entry.legacy.Method.ID), string(methodValue)),
-			clientv3.OpPut(s.bindingKey(s.bindingPrefix(false), name), string(recordValue)),
-		)
-	}
-	return operations, nil
-}
-
-func (s *RouteBindingStore) runtimeIdentityReplacementOperations(
-	old routeBindingEntry,
-	existed bool,
-	compiled schema.CompiledRoute,
-) []clientv3.Op {
-	if !existed {
-		return nil
-	}
-	if old.record.ResourceID != compiled.Resource.ID {
-		return []clientv3.Op{clientv3.OpDelete(s.runtimeResourceKey(old.record.ResourceID), clientv3.WithPrefix())}
-	}
-	if old.record.MethodID != compiled.Method.ID {
-		return []clientv3.Op{clientv3.OpDelete(s.runtimeMethodKey(old.record.ResourceID, old.record.MethodID))}
-	}
-	return nil
 }
 
 func marshalCompiledRuntimeRoute(compiled schema.CompiledRoute) ([]byte, []byte, error) {
@@ -1167,6 +1003,9 @@ func (s *RouteBindingStore) getEntry(ctx context.Context, prefix, name string) (
 	return entry, true, entry.revision, nil
 }
 
+// markerRevision reads the internal published generation used to protect a
+// single-route publish from publishing against a stale published snapshot.
+// It is intentionally not exposed as a global publish status API.
 func (s *RouteBindingStore) markerRevision(ctx context.Context, key string) (int64, bool, error) {
 	response, err := s.kv.Get(ctx, key)
 	if err != nil {
@@ -1303,10 +1142,6 @@ func (s *RouteBindingStore) bindingPrefix(unpublished bool) string {
 
 func (s *RouteBindingStore) bindingKey(prefix, name string) string {
 	return prefix + url.PathEscape(name)
-}
-
-func (s *RouteBindingStore) draftRevisionKey() string {
-	return s.root + "/" + Unpublished + "/" + routeBindingRevisionSegment
 }
 
 func (s *RouteBindingStore) publishedRevisionKey() string {

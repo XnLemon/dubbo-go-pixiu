@@ -516,10 +516,7 @@ type RouteRow = {
   status: RouteStatus
   enabled: boolean
   publishedRevision: number
-}
-
-function routeObjectsMatch(left: RouteBinding, right: RouteBinding) {
-  return JSON.stringify(left.object) === JSON.stringify(right.object)
+  publishStatus: RouteBindingPublishStatus
 }
 
 function routeDisplayString(value: unknown, fallback: string) {
@@ -529,6 +526,7 @@ function routeDisplayString(value: unknown, fallback: string) {
 function routeRow(
   binding: RouteBinding,
   published: Map<string, RouteBinding>,
+  publishStatus: RouteBindingPublishStatus,
   locale: Locale,
 ): RouteRow {
   const object = binding.object
@@ -554,10 +552,10 @@ function routeRow(
       (typeof target.cluster === 'string' && target.cluster.trim()
         ? target.cluster
         : translateText(locale, '未配置后端目标')),
-    status:
-      publishedBinding && routeObjectsMatch(binding, publishedBinding) ? 'Published' : 'Draft',
+    status: publishStatus.publishedExists && !publishStatus.dirty ? 'Published' : 'Draft',
     enabled: runtimeSpec.enabled !== false,
-    publishedRevision: publishedBinding?.revision || 0,
+    publishedRevision: publishStatus.publishedRevision,
+    publishStatus,
   }
 }
 
@@ -574,6 +572,7 @@ export function ResourcePage({
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<'All' | RouteStatus>('All')
   const [loading, setLoading] = useState(true)
+  const [deletingRoute, setDeletingRoute] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [editor, setEditor] = useState<{
     mode: 'create' | 'edit'
@@ -594,7 +593,20 @@ export function ResourcePage({
       const published = new Map(
         publishedBindings.map((binding) => [binding.object.metadata.name, binding]),
       )
-      setRows(draftBindings.map((binding) => routeRow(binding, published, locale)))
+      const statuses = new Map(
+        draftBindings.map((binding) => {
+          const name = binding.object.metadata.name
+          if (!binding.publishStatus) {
+            throw new Error(`Route list did not include publish status for ${name}`)
+          }
+          return [name, binding.publishStatus] as const
+        }),
+      )
+      setRows(
+        draftBindings.map((binding) =>
+          routeRow(binding, published, statuses.get(binding.object.metadata.name)!, locale),
+        ),
+      )
       onCountChange?.(draftBindings.length)
     } catch (e) {
       setError(e instanceof Error ? e.message : tx('加载路由失败'))
@@ -639,14 +651,7 @@ export function ResourcePage({
       binding: null,
       loading: true,
       published: row.status === 'Published',
-      publishStatus: {
-        name,
-        draftRevision: row.binding.revision,
-        publishedRevision: row.publishedRevision,
-        draftExists: true,
-        publishedExists: row.status === 'Published',
-        dirty: row.status !== 'Published',
-      },
+      publishStatus: row.publishStatus,
     })
     try {
       const [binding, routeStatus] = await Promise.all([
@@ -664,6 +669,28 @@ export function ResourcePage({
     } catch (e) {
       setError(e instanceof Error ? e.message : tx('加载路由详情失败'))
       setEditor(null)
+    }
+  }
+  const removeRoute = async (row: RouteRow) => {
+    if (deletingRoute !== null) return
+    const name = row.binding.object.metadata.name
+    if (
+      !window.confirm(
+        locale === 'en-US'
+          ? `Delete API route “${name}” and remove it from Pixiu?`
+          : `确认删除 API 路由“${name}”并从 Pixiu 中移除吗？`,
+      )
+    )
+      return
+    setError('')
+    setDeletingRoute(name)
+    try {
+      await routeBindingApi.remove(name, row.binding.revision)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : tx('删除路由失败'))
+    } finally {
+      setDeletingRoute(null)
     }
   }
   const statusLabel = (value: RouteStatus) => (value === 'Published' ? tx('已发布') : tx('草稿'))
@@ -805,6 +832,14 @@ export function ResourcePage({
                       <div className="row-actions route-row-actions">
                         <button className="link-btn" onClick={() => void openEdit(row)}>
                           {tx('编辑')}
+                        </button>
+                        <button
+                          className="link-btn danger-link"
+                          disabled={deletingRoute !== null}
+                          onClick={() => void removeRoute(row)}
+                        >
+                          <Trash2 size={13} />
+                          {deletingRoute === row.name ? tx('删除中…') : tx('删除')}
                         </button>
                       </div>
                     </td>
