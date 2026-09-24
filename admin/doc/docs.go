@@ -525,6 +525,15 @@ const docTemplate = `{
                     "Config"
                 ],
                 "summary": "modify API route binding draft",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Original route binding name",
+                        "name": "name",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "OK",

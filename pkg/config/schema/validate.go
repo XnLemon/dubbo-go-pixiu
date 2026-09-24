@@ -55,6 +55,12 @@ func (r *Registry) Normalize(object AdminObject) (AdminObject, error) {
 	if normalized.Spec == nil {
 		normalized.Spec = make(map[string]any)
 	}
+	// The publish object used to contain UI-only lifecycle preferences. Drop it
+	// while normalizing older drafts so removing those no-op fields does not
+	// block an existing route from publishing.
+	if normalized.Kind == KindAdminRouteBinding {
+		delete(normalized.Spec, "publish")
+	}
 
 	issues := validateEnvelope(normalized)
 	objectSchema, validators, exists := r.lookupEntry(normalized.Kind)

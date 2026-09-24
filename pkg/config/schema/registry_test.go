@@ -38,7 +38,7 @@ func TestBuiltinRegistryContainsOnlyAdminRouteBinding(t *testing.T) {
 	assert.Contains(t, objectSchema.Fields, "target")
 	assert.Contains(t, objectSchema.Fields, "params")
 	assert.Contains(t, objectSchema.Fields, "enabled")
-	assert.Contains(t, objectSchema.Fields, "publish")
+	assert.NotContains(t, objectSchema.Fields, "publish")
 }
 
 func TestRegistryAddsTypedExtensionWithoutExposingMutableSchema(t *testing.T) {

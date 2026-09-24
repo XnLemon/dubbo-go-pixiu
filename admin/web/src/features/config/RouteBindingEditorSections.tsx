@@ -125,9 +125,7 @@ type ParamCardProps = {
 type PublishCardProps = {
   readonly isEnglish: boolean
   readonly enabled: boolean
-  readonly validate: boolean
   readonly onEnabledChange: (enabled: boolean) => void
-  readonly onValidateChange: (validate: boolean) => void
 }
 
 type FormViewProps = IdentityCardProps & TargetCardProps & ParamCardProps & PublishCardProps
@@ -170,7 +168,6 @@ type ContentProps = {
   readonly onParamUpdate: (index: number, patch: Partial<RouteBindingParam>) => void
   readonly onParamRemove: (index: number) => void
   readonly onEnabledChange: (enabled: boolean) => void
-  readonly onValidateChange: (validate: boolean) => void
   readonly onRefreshDiff: () => void
   readonly onApplyYaml: () => void
   readonly onChangeYaml: (value: string) => void
@@ -722,21 +719,15 @@ function RouteParamsCard({
   )
 }
 
-function RoutePublishCard({
-  isEnglish,
-  enabled,
-  validate,
-  onEnabledChange,
-  onValidateChange,
-}: PublishCardProps) {
+function RoutePublishCard({ isEnglish, enabled, onEnabledChange }: PublishCardProps) {
   return (
     <section className="panel route-publish-panel">
       <div>
         <h2>{isEnglish ? 'Release and lifecycle' : '发布与生命周期'}</h2>
         <span>
           {isEnglish
-            ? 'Both lifecycle changes and validation preferences are published with this route.'
-            : '路由启停和校验偏好都会随当前路由一起发布。'}
+            ? 'The route enabled state is published atomically with this route.'
+            : '路由启停状态会随当前路由一起原子发布。'}
         </span>
       </div>
       <div className="route-switches">
@@ -749,16 +740,6 @@ function RoutePublishCard({
           />
           <span className="route-switch-track" />
           <span>{isEnglish ? 'Route enabled' : '启用路由'}</span>
-        </label>
-        <label className="route-switch">
-          <input
-            type="checkbox"
-            checked={validate}
-            aria-label={isEnglish ? 'Validate before publish' : '发布前校验'}
-            onChange={(event) => onValidateChange(event.target.checked)}
-          />
-          <span className="route-switch-track" />
-          <span>{isEnglish ? 'Validate before publish' : '发布前校验'}</span>
         </label>
       </div>
     </section>
@@ -774,7 +755,6 @@ function RouteFormView(props: FormViewProps) {
     target,
     params,
     enabled,
-    validate,
     issueMessage,
     onNameChange,
     onPathChange,
@@ -784,7 +764,6 @@ function RouteFormView(props: FormViewProps) {
     onUpdate,
     onRemove,
     onEnabledChange,
-    onValidateChange,
   } = props
   return (
     <>
@@ -814,13 +793,7 @@ function RouteFormView(props: FormViewProps) {
         onUpdate={onUpdate}
         onRemove={onRemove}
       />
-      <RoutePublishCard
-        isEnglish={isEnglish}
-        enabled={enabled}
-        validate={validate}
-        onEnabledChange={onEnabledChange}
-        onValidateChange={onValidateChange}
-      />
+      <RoutePublishCard isEnglish={isEnglish} enabled={enabled} onEnabledChange={onEnabledChange} />
     </>
   )
 }
@@ -1071,7 +1044,6 @@ export function RouteEditorContent({
   onParamUpdate,
   onParamRemove,
   onEnabledChange,
-  onValidateChange,
   onRefreshDiff,
   onApplyYaml,
   onChangeYaml,
@@ -1098,7 +1070,6 @@ export function RouteEditorContent({
         target={object.spec.target}
         params={object.spec.params}
         enabled={object.spec.enabled}
-        validate={object.spec.publish.validate}
         issueMessage={issueMessage}
         onNameChange={onNameChange}
         onPathChange={(value) => onEntryChange('path', value)}
@@ -1108,7 +1079,6 @@ export function RouteEditorContent({
         onUpdate={onParamUpdate}
         onRemove={onParamRemove}
         onEnabledChange={onEnabledChange}
-        onValidateChange={onValidateChange}
       />
     )
   }

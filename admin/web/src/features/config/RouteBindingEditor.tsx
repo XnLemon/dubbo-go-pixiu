@@ -68,7 +68,6 @@ function createDefaultObject(): AdminRouteBindingObject {
       },
       params: [],
       enabled: true,
-      publish: { mode: 'draft', validate: true },
       extensions: {},
     },
   }
@@ -89,7 +88,6 @@ function normaliseObject(value: unknown): AdminRouteBindingObject {
   const spec = asJsonObject(root.spec)
   const rawEntry = asJsonObject(spec.entry)
   const rawTarget = asJsonObject(spec.target)
-  const rawPublish = asJsonObject(spec.publish)
   const rawParams = Array.isArray(spec.params) ? spec.params : []
 
   const params = rawParams.map((rawParam, index): RouteBindingParam => {
@@ -121,10 +119,6 @@ function normaliseObject(value: unknown): AdminRouteBindingObject {
       },
       params,
       enabled: typeof spec.enabled === 'boolean' ? spec.enabled : true,
-      publish: {
-        mode: stringValue(rawPublish.mode, 'draft'),
-        validate: typeof rawPublish.validate === 'boolean' ? rawPublish.validate : true,
-      },
       extensions: asJsonObject(spec.extensions),
     },
   }
@@ -352,12 +346,6 @@ export function RouteBindingEditor({
       },
     })
 
-  const setPublishValidation = (validate: boolean) =>
-    updateObject({
-      ...object,
-      spec: { ...object.spec, publish: { ...object.spec.publish, validate } },
-    })
-
   const setRouteEnabled = (enabled: boolean) =>
     updateObject({ ...object, spec: { ...object.spec, enabled } })
 
@@ -403,7 +391,11 @@ export function RouteBindingEditor({
       const saved =
         mode === 'create'
           ? await routeBindingApi.create(object)
-          : await routeBindingApi.update(object, revision)
+          : await routeBindingApi.update(
+              binding?.object.metadata.name || object.metadata.name,
+              object,
+              revision,
+            )
       const normalized = normaliseObject(saved.object)
       setObject(normalized)
       setRouteYaml(stringifyRouteBindingYaml(normalized))
@@ -565,7 +557,6 @@ export function RouteBindingEditor({
         onParamUpdate={updateParam}
         onParamRemove={removeParam}
         onEnabledChange={setRouteEnabled}
-        onValidateChange={setPublishValidation}
         onRefreshDiff={() => void loadDiff()}
         onApplyYaml={applyYamlToForm}
         onChangeYaml={updateYaml}

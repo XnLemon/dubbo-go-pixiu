@@ -18,6 +18,3 @@ spec:
     - from: uri.id
       to: 0
       type: java.lang.String
-  publish:
-    mode: draft
-    validate: true

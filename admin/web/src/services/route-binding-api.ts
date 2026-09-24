@@ -65,8 +65,8 @@ export const routeBindingApi = {
       method: 'POST',
       body: mutationBody(object),
     }),
-  update: (object: AdminRouteBindingObject, expectedRevision = 0) =>
-    request<RouteBinding>(pixiuAdminApi.routeBindings.update, {
+  update: (name: string, object: AdminRouteBindingObject, expectedRevision = 0) =>
+    request<RouteBinding>(`${pixiuAdminApi.routeBindings.update}${query({ name })}`, {
       method: 'PUT',
       body: mutationBody(object, expectedRevision),
     }),

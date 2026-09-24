@@ -50,10 +50,6 @@ export type AdminRouteBindingObject = {
     }
     params: RouteBindingParam[]
     enabled: boolean
-    publish: {
-      mode: string
-      validate: boolean
-    }
     extensions: JsonObject
   }
 }

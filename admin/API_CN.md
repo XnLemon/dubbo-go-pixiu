@@ -6,6 +6,10 @@ API Router 配置统一使用 `AdminRouteBinding` 生命周期管理：先保存
 
 更多接口说明请参考 [Swagger 文档](./doc/swagger.json)。
 
+## 升级兼容性
+
+Admin API Router 现在统一使用 `AdminRouteBinding` 模型。这对旧的 Resource/Method 管理模型属于 breaking change：新接口不会自动导入或转换已有的旧配置，旧配置也不会出现在新的路由接口列表中。升级后如果需要通过新的 Admin API 管理这些路由，需要重新创建为 `AdminRouteBinding`。
+
 ## 返回值说明
 
 * `10001`：成功
@@ -40,10 +44,10 @@ GET /config/api/route/diff?name=<路由名>
 
 ```http
 POST /config/api/route
-PUT /config/api/route
+PUT /config/api/route?name=<原始路由名>
 ```
 
-请求体为 `AdminRouteBinding` JSON 对象。更新时可以携带 `expectedRevision` 做乐观并发控制：
+请求体为 `AdminRouteBinding` JSON 对象。更新时 `name` 查询参数是不可变的路由身份，必须与 `metadata.name` 一致；同时可以携带 `expectedRevision` 做乐观并发控制：
 
 ```json
 {
@@ -65,6 +69,8 @@ POST /config/api/route/preview
 
 这两个接口不会写入配置。校验接口会补齐 schema 默认值，预览接口返回 Pixiu 当前 watcher 使用的 legacy YAML。
 
+发布始终会校验路由，不再保存或提供单路由校验开关。
+
 ### 单路由发布和删除
 
 ```http
@@ -73,3 +79,5 @@ DELETE /config/api/route?name=<路由名>&expectedRevision=<revision>
 ```
 
 两个操作都按单路由执行，并通过一个 etcd 事务同步 Admin binding 和生成的运行时配置。系统不再提供全量配置发布接口。
+
+发布前会检查运行时 `resources/*/method/*` 中已有的旧 Resource/Method 路由；如果相同 HTTP 方法和路径已经存在，发布会被拒绝，需要先清理旧路由。

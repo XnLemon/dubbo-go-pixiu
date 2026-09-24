@@ -65,6 +65,20 @@ describe('Pixiu Admin API contract', () => {
     )
   })
 
+  it('includes the original route name when updating an API route', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ code: '10001', data: {} }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await routeBindingApi.update('user-get', {} as Parameters<typeof routeBindingApi.update>[1])
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${pixiuAdminApi.routeBindings.update}?name=user-get`,
+      expect.objectContaining({ method: 'PUT', headers: expect.any(Headers) }),
+    )
+  })
+
   it('surfaces malformed list responses instead of treating them as empty', async () => {
     vi.stubGlobal(
       'fetch',

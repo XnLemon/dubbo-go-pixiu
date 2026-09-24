@@ -136,24 +136,6 @@ func adminRouteBindingSchema() ObjectSchema {
 				Description: "Whether Pixiu accepts requests for the published route",
 				UI:          UIHints{Component: "switch", Group: "lifecycle", Order: 10},
 			},
-			"publish": {
-				Type:    FieldTypeObject,
-				Default: map[string]any{},
-				Properties: map[string]*FieldSchema{
-					"mode": {
-						Type:    FieldTypeString,
-						Default: "draft",
-						Enum:    []any{"draft", "published"},
-						UI:      UIHints{Component: "select", Order: 10},
-					},
-					"validate": {
-						Type:    FieldTypeBoolean,
-						Default: true,
-						UI:      UIHints{Component: "switch", Order: 20},
-					},
-				},
-				UI: UIHints{Group: "publish", Order: 40, Advanced: true},
-			},
 			"extensions": {
 				Type:    FieldTypeObject,
 				Default: map[string]any{},

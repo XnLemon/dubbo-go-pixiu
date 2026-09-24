@@ -6,6 +6,10 @@ The API Router configuration is managed through the `AdminRouteBinding` lifecycl
 
 More detailed API descriptions are available in the [Swagger documentation](./doc/swagger.json).
 
+## Upgrade compatibility
+
+The Admin API Router model is now `AdminRouteBinding`. This is a breaking change for the legacy Resource/Method admin model: the new API does not import or convert existing legacy records, and they are not listed by the new route endpoints. Recreate routes as `AdminRouteBinding` objects when they need to be managed through the new Admin API.
+
 ## Response Codes
 
 * `10001`: Success
@@ -40,10 +44,10 @@ The draft list includes the backend-calculated publish status for every route.
 
 ```http
 POST /config/api/route
-PUT /config/api/route
+PUT /config/api/route?name=<original-route-name>
 ```
 
-Send an `AdminRouteBinding` JSON object. Updates may include `expectedRevision` for optimistic concurrency control:
+Send an `AdminRouteBinding` JSON object. The `name` query parameter is the immutable route identity and must match `metadata.name`; updates may include `expectedRevision` for optimistic concurrency control:
 
 ```json
 {
@@ -65,6 +69,8 @@ POST /config/api/route/preview
 
 These endpoints do not write configuration. Validation applies schema defaults; preview returns the generated legacy Pixiu YAML.
 
+Publishing always validates the route; there is no per-route validation toggle.
+
 ### Publish or delete one route
 
 ```http
@@ -73,3 +79,5 @@ DELETE /config/api/route?name=<route-name>&expectedRevision=<revision>
 ```
 
 Both operations are independent per route and use one etcd transaction for the Admin binding and generated runtime configuration. There is no full-configuration publish endpoint.
+
+Before publishing, the Admin API checks existing runtime `resources/*/method/*` entries from the legacy Resource/Method model. A route with the same HTTP method and path is rejected until the old runtime route is removed.

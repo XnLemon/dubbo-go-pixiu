@@ -19,6 +19,7 @@ package logic
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -29,7 +30,6 @@ import (
 import (
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
-
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -299,6 +299,33 @@ func TestRouteBindingStorePublishRejectsConcurrentDraftChange(t *testing.T) {
 	}
 }
 
+func TestRouteBindingStoreUpdateRejectsNameChange(t *testing.T) {
+	store := newTestRouteBindingStore(t)
+	saved, err := store.SaveDraft(context.Background(), testRouteBinding("user-get", "/api/users", "GET"), true, 0)
+	if err != nil {
+		t.Fatalf("initial SaveDraft: %v", err)
+	}
+
+	if _, err := store.UpdateDraft(context.Background(), "user-get", testRouteBinding("renamed", "/api/users", "GET"), saved.Revision); !errors.Is(err, ErrRouteBindingNameImmutable) {
+		t.Fatalf("rename error: want %v, got %v", ErrRouteBindingNameImmutable, err)
+	}
+	if _, err := store.Get(context.Background(), "user-get", true); err != nil {
+		t.Fatalf("original route after rejected rename: %v", err)
+	}
+	if _, err := store.Get(context.Background(), "renamed", true); !errors.Is(err, ErrRouteBindingNotFound) {
+		t.Fatalf("renamed route after rejected rename: want %v, got %v", ErrRouteBindingNotFound, err)
+	}
+
+	updated := testRouteBinding("user-get", "/api/users/:id", "GET")
+	updatedBinding, err := store.UpdateDraft(context.Background(), "user-get", updated, saved.Revision)
+	if err != nil {
+		t.Fatalf("same-name UpdateDraft: %v", err)
+	}
+	if updatedBinding.Object.Spec["entry"].(map[string]any)["path"] != "/api/users/:id" {
+		t.Fatalf("same-name update was not saved: %+v", updatedBinding.Object)
+	}
+}
+
 func TestRouteBindingStoreRejectsDuplicatePublishedRoute(t *testing.T) {
 	store := newTestRouteBindingStore(t)
 	if _, err := store.SaveDraft(context.Background(), testRouteBinding("user-get-a", "/api/users", "GET"), true, 0); err != nil {
@@ -327,6 +354,42 @@ func TestRouteBindingStoreRejectsDuplicatePublishedRoute(t *testing.T) {
 	}
 	if fake.fakeHasKey(store.runtimeResourceKey(second.ResourceID)) {
 		t.Fatal("duplicate publish wrote a partial runtime route")
+	}
+}
+
+func TestRouteBindingStoreRejectsExistingRuntimeRoute(t *testing.T) {
+	store := newTestRouteBindingStore(t)
+	fake := fakeRouteBindingStoreKV(t, store)
+	legacyMethod, err := commonyaml.MarshalYML(legacyconfig.Method{
+		ID:           7,
+		ResourcePath: "/api/users",
+		HTTPVerb:     "GET",
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy Method: %v", err)
+	}
+	fake.fakePut(store.runtimeMethodKey(99, 7)+"/", legacyMethod)
+
+	saved, err := store.SaveDraft(context.Background(), testRouteBinding("new-user-get", "/api/users", "GET"), true, 0)
+	if err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	if _, err := store.Publish(context.Background(), saved.Object.Metadata.Name, saved.Revision); !errors.Is(err, ErrRouteBindingRuntimeConflict) {
+		t.Fatalf("runtime conflict: want %v, got %v", ErrRouteBindingRuntimeConflict, err)
+	}
+	if fake.fakeHasKey(store.bindingKey(store.bindingPrefix(false), saved.Object.Metadata.Name)) {
+		t.Fatal("runtime conflict wrote a published binding")
+	}
+	if fake.fakeHasKey(store.runtimeResourceKey(saved.ResourceID)) {
+		t.Fatal("runtime conflict wrote a generated resource")
+	}
+}
+
+func TestRouteBindingStoreRepublishAllowsOwnRuntimeRoute(t *testing.T) {
+	store := newTestRouteBindingStore(t)
+	saved := saveAndPublishTestRoute(t, store)
+	if _, err := store.Publish(context.Background(), saved.Object.Metadata.Name, saved.Revision); err != nil {
+		t.Fatalf("republish route: %v", err)
 	}
 }
 
@@ -462,6 +525,19 @@ func (f *fakeRouteBindingKV) fakeValue(key string) []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]byte(nil), f.values[key].value...)
+}
+
+func (f *fakeRouteBindingKV) fakePut(key string, value []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revision++
+	entry := f.values[key]
+	if entry.createRev == 0 {
+		entry.createRev = f.revision
+	}
+	entry.modifyRev = f.revision
+	entry.value = append([]byte(nil), value...)
+	f.values[key] = entry
 }
 
 func (f *fakeRouteBindingKV) fakeHasKey(key string) bool {

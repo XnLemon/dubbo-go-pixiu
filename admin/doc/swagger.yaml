@@ -361,6 +361,12 @@ paths:
     put:
       consumes:
       - application/json
+      parameters:
+      - description: Original route binding name
+        in: query
+        name: name
+        required: true
+        type: string
       produces:
       - application/json
       responses:

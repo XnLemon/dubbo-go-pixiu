@@ -60,13 +60,23 @@ func TestNormalizeAppliesFormDefaultsWithoutMutatingInput(t *testing.T) {
 
 	entry := normalized.Spec["entry"].(map[string]any)
 	target := normalized.Spec["target"].(map[string]any)
-	publish := normalized.Spec["publish"].(map[string]any)
 	assert.Equal(t, "http", entry["protocol"])
 	assert.Equal(t, "dubbo", target["protocol"])
 	assert.Equal(t, []any{}, normalized.Spec["params"])
 	assert.Equal(t, true, normalized.Spec["enabled"])
-	assert.Equal(t, "draft", publish["mode"])
-	assert.Equal(t, true, publish["validate"])
+	assert.NotContains(t, normalized.Spec, "publish")
+}
+
+func TestNormalizeDropsDeprecatedPublishMetadata(t *testing.T) {
+	registry, err := NewBuiltinRegistry()
+	require.NoError(t, err)
+	object := validRouteBindingObject()
+	object.Spec["publish"] = map[string]any{"mode": "draft", "validate": false}
+
+	normalized, err := registry.Normalize(object)
+	require.NoError(t, err)
+	assert.NotContains(t, normalized.Spec, "publish")
+	assert.Contains(t, object.Spec, "publish")
 }
 
 func TestCompileAdminRouteBindingToLegacyResourceAndMethod(t *testing.T) {

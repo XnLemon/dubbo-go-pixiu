@@ -20,6 +20,7 @@ package configInfo
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,6 +32,7 @@ import (
 
 import (
 	adminconfig "github.com/apache/dubbo-go-pixiu/admin/config"
+	"github.com/apache/dubbo-go-pixiu/admin/logic"
 	"github.com/apache/dubbo-go-pixiu/pkg/config/schema"
 )
 
@@ -81,8 +83,8 @@ func TestValidateRouteBindingReturnsDefaults(t *testing.T) {
 	if result.Data.Object.Spec["enabled"] != true {
 		t.Fatalf("enabled default: %+v", result.Data.Object.Spec["enabled"])
 	}
-	if result.Data.Object.Spec["publish"].(map[string]any)["mode"] != "draft" {
-		t.Fatalf("publish defaults: %+v", result.Data.Object.Spec["publish"])
+	if _, exists := result.Data.Object.Spec["publish"]; exists {
+		t.Fatalf("deprecated publish metadata was returned: %+v", result.Data.Object.Spec["publish"])
 	}
 }
 
@@ -147,6 +149,27 @@ func TestPreviewRouteBindingReturnsLegacyYAML(t *testing.T) {
 	}
 	if bytes.Contains([]byte(result.Data.YAML), []byte("AdminRouteBinding")) || bytes.Contains([]byte(result.Data.YAML), []byte("publish:")) {
 		t.Fatalf("control-plane fields leaked into legacy preview: %q", result.Data.YAML)
+	}
+}
+
+func TestWriteRouteBindingErrorReturnsRetryCode(t *testing.T) {
+	tests := []error{
+		logic.ErrRouteBindingConflict,
+		fmt.Errorf("wrapped publish conflict: %w", logic.ErrRouteBindingPublishConflict),
+	}
+	for _, err := range tests {
+		response := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(response)
+		writeRouteBindingError(context, err)
+
+		var result adminconfig.RetData
+		decodeRouteBindingResponse(t, response, &result)
+		if result.Code != adminconfig.RETRY {
+			t.Fatalf("error %q: response code: want %s, got %s", err, adminconfig.RETRY, result.Code)
+		}
+		if result.Data != err.Error() {
+			t.Fatalf("error %q: response data: want %q, got %#v", err, err.Error(), result.Data)
+		}
 	}
 }
 

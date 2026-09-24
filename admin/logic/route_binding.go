@@ -51,8 +51,10 @@ const (
 var (
 	ErrRouteBindingNotFound        = errors.New("admin route binding not found")
 	ErrRouteBindingAlreadyExists   = errors.New("admin route binding already exists")
+	ErrRouteBindingNameImmutable   = errors.New("admin route binding metadata.name is immutable")
 	ErrRouteBindingConflict        = errors.New("admin route binding was modified concurrently")
 	ErrRouteBindingPublishConflict = errors.New("admin route binding publish conflict")
+	ErrRouteBindingRuntimeConflict = errors.New("admin route binding conflicts with an existing runtime route")
 )
 
 // routeBindingKV is the small part of clientv3.KV needed by the route store.
@@ -332,6 +334,24 @@ func (s *RouteBindingStore) SaveDraft(ctx context.Context, object schema.AdminOb
 	return routeBindingView(saved), nil
 }
 
+// UpdateDraft updates one existing route binding draft without allowing its
+// metadata.name to change. The original name is the stable identity supplied
+// by the caller, while the object name is user-editable in the YAML editor.
+func (s *RouteBindingStore) UpdateDraft(ctx context.Context, originalName string, object schema.AdminObject, expectedRevision int64) (RouteBinding, error) {
+	originalName, err := normalizeRouteBindingName(originalName)
+	if err != nil {
+		return RouteBinding{}, err
+	}
+	normalized, err := s.Normalize(object)
+	if err != nil {
+		return RouteBinding{}, err
+	}
+	if normalized.Metadata.Name != originalName {
+		return RouteBinding{}, fmt.Errorf("%w: %q cannot be changed to %q", ErrRouteBindingNameImmutable, originalName, normalized.Metadata.Name)
+	}
+	return s.SaveDraft(ctx, normalized, false, expectedRevision)
+}
+
 func validateSaveDraftRequest(create bool, expectedRevision int64) error {
 	if expectedRevision < 0 {
 		return errors.New("expected revision must not be negative")
@@ -489,6 +509,9 @@ func (s *RouteBindingStore) Publish(ctx context.Context, name string, expectedDr
 	}
 	candidate, err := s.compilePublishCandidate(name, state.draft, state.draftExists, publishedEntries)
 	if err != nil {
+		return RouteBindingPublishResult{}, err
+	}
+	if err := s.checkRuntimeRouteConflict(ctx, candidate, state); err != nil {
 		return RouteBindingPublishResult{}, err
 	}
 	comparisons, err := s.buildPublishComparisons(ctx, state)
@@ -655,6 +678,48 @@ func (s *RouteBindingStore) publishedRouteRevision(ctx context.Context, prefix, 
 		return 0, fmt.Errorf("route binding %q disappeared after publish", name)
 	}
 	return revision, nil
+}
+
+// checkRuntimeRouteConflict protects the breaking migration boundary between
+// the legacy Resource/Method keys and AdminRouteBinding. Existing runtime
+// method keys are still consumed by Pixiu's watcher, even when they are not
+// visible through the new Admin API. Publishing a new route with the same
+// HTTP method and path would otherwise commit successfully and leave the
+// watcher with duplicate runtime routes.
+func (s *RouteBindingStore) checkRuntimeRouteConflict(ctx context.Context, candidate *compiledRouteEntry, state routeBindingPublishState) error {
+	if candidate == nil {
+		return nil
+	}
+	prefix := s.runtimeResourcePrefix()
+	response, err := s.kv.Get(ctx, prefix, clientv3.WithPrefix())
+	if err != nil {
+		return fmt.Errorf("list existing runtime methods: %w", err)
+	}
+	candidatePath := candidate.legacy.Resource.Path
+	candidateVerb := strings.TrimSpace(candidate.legacy.Method.HTTPVerb)
+	for _, kv := range response.Kvs {
+		resourceID, methodID, ok, err := runtimeMethodIDs(prefix, string(kv.Key))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		// A republish of the same published AdminRouteBinding owns this runtime
+		// identity; a new route must not bypass the check by reusing an orphaned
+		// legacy method key with the same numeric IDs.
+		if state.publishedExists && resourceID == state.published.record.ResourceID && methodID == state.published.record.MethodID {
+			continue
+		}
+		var method legacyconfig.Method
+		if err := commonyaml.UnmarshalYML(kv.Value, &method); err != nil {
+			return fmt.Errorf("decode existing runtime method %q: %w", string(kv.Key), err)
+		}
+		if method.ResourcePath == candidatePath && strings.EqualFold(method.HTTPVerb, candidateVerb) {
+			return fmt.Errorf("%w: %s %s already exists at %q", ErrRouteBindingRuntimeConflict, candidateVerb, candidatePath, string(kv.Key))
+		}
+	}
+	return nil
 }
 
 // Status returns draft and published revisions for one route. The revisions
@@ -1152,6 +1217,29 @@ func (s *RouteBindingStore) runtimeResourceKey(resourceID int) string {
 	return s.root + "/" + routeBindingRuntimeResourceDir + "/" + strconv.Itoa(resourceID)
 }
 
+func (s *RouteBindingStore) runtimeResourcePrefix() string {
+	return s.root + "/" + routeBindingRuntimeResourceDir + "/"
+}
+
 func (s *RouteBindingStore) runtimeMethodKey(resourceID, methodID int) string {
 	return s.runtimeResourceKey(resourceID) + "/" + Method + "/" + strconv.Itoa(methodID)
+}
+
+func runtimeMethodIDs(prefix, key string) (int, int, bool, error) {
+	if !strings.HasPrefix(key, prefix) {
+		return 0, 0, false, nil
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(key, prefix), "/"), "/")
+	if len(parts) != 3 || parts[1] != Method {
+		return 0, 0, false, nil
+	}
+	resourceID, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, true, fmt.Errorf("invalid runtime resource key %q: %w", key, err)
+	}
+	methodID, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, 0, true, fmt.Errorf("invalid runtime method key %q: %w", key, err)
+	}
+	return resourceID, methodID, true, nil
 }

@@ -168,9 +168,15 @@ func CreateRouteBinding(c *gin.Context) {
 // @Summary modify API route binding draft
 // @Accept application/json
 // @Produce application/json
+// @Param name query string true "Original route binding name"
 // @Success 200 {object} string
 // @Router /config/api/route [put]
 func ModifyRouteBinding(c *gin.Context) {
+	originalName := strings.TrimSpace(c.Query("name"))
+	if originalName == "" {
+		writeRouteBindingError(c, errors.New("route binding name query parameter is required for update"))
+		return
+	}
 	object, expectedRevision, err := decodeRouteBindingRequest(c)
 	if err != nil {
 		writeRouteBindingError(c, err)
@@ -181,7 +187,7 @@ func ModifyRouteBinding(c *gin.Context) {
 		writeRouteBindingError(c, err)
 		return
 	}
-	binding, err := store.SaveDraft(c.Request.Context(), object, false, expectedRevision)
+	binding, err := store.UpdateDraft(c.Request.Context(), originalName, object, expectedRevision)
 	if err != nil {
 		writeRouteBindingError(c, err)
 		return
@@ -457,6 +463,10 @@ func routeBindingUnpublished(c *gin.Context) bool {
 func writeRouteBindingError(c *gin.Context, err error) {
 	if err == nil {
 		err = errors.New("unknown route binding error")
+	}
+	if errors.Is(err, logic.ErrRouteBindingConflict) || errors.Is(err, logic.ErrRouteBindingPublishConflict) {
+		c.JSON(http.StatusOK, adminconfig.RetData{Code: adminconfig.RETRY, Data: err.Error()})
+		return
 	}
 	var validationErrors schema.ValidationErrors
 	if errors.As(err, &validationErrors) {
