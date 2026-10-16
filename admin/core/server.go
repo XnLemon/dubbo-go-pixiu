@@ -29,6 +29,7 @@ import (
 
 import (
 	"github.com/apache/dubbo-go-pixiu/admin/config"
+	"github.com/apache/dubbo-go-pixiu/admin/controller/auth"
 	"github.com/apache/dubbo-go-pixiu/admin/global"
 	"github.com/apache/dubbo-go-pixiu/admin/initialize"
 	"github.com/apache/dubbo-go-pixiu/admin/logic/account"
@@ -47,7 +48,10 @@ type server interface {
 }
 
 // RunServer start server
-func RunServer() {
+func RunServer() error {
+	if _, err := auth.GetSignKey(); err != nil {
+		return err
+	}
 	// load config
 	global.VP = Viper()
 	global.LOG = Zap()
@@ -79,11 +83,13 @@ func RunServer() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		global.LOG.Info("xDS server run success on :18000")
+		xdsConfig := config.Bootstrap.GetXDSConfig()
+		global.LOG.Info("xDS server starting", zap.Uint("port", xdsConfig.ListenPort), zap.String("node_id", xdsConfig.NodeID))
 		if err := StartxDsServer(); err != nil {
 			global.LOG.Error(err.Error())
 		}
 	}()
 
 	wg.Wait()
+	return nil
 }
