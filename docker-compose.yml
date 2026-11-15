@@ -135,7 +135,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-      start_period: 30s
+      # A cold `go run` downloads and compiles Admin inside the container.
+      start_period: 180s
 
   # frontend（Web）
   frontend:
