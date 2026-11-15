@@ -1,0 +1,2 @@
+# Runtime state from the Compose etcd service is not part of the Pixiu image.
+etcd-data/
