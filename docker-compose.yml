@@ -118,7 +118,7 @@ services:
       - .:/app
     ports:
       - "8081:8081"
-    command: ["go", "run", "./cmd/admin", "-c", "./configs/admin_docker_config.yaml"]
+    command: ["go", "run", "./cmd/admin", "-c", "./configs/admin_docker_config.yaml", "-a", "./configs/admin_docker_config.yaml"]
     environment:
       - GO111MODULE=on
       - GOPROXY=https://goproxy.cn,direct

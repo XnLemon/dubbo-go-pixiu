@@ -41,6 +41,8 @@ cleanup() {
 trap cleanup EXIT
 
 docker compose config --quiet
+docker compose up --detach --wait --wait-timeout 60 etcd
+docker compose exec -T etcd etcdctl --endpoints=http://127.0.0.1:2379 put /pixiu/config/api/base 'name: pixiu'
 docker compose up --build --detach --wait --wait-timeout 300
 
 docker compose exec -T frontend npm run typecheck
