@@ -26,18 +26,35 @@ on:
     paths:
       - 'admin/**'
       - 'cmd/admin/**'
+      - 'admin/resources/sql/**'
+      - 'configs/admin_docker_config.yaml'
+      - 'configs/log.yml'
+      - 'configs/pixiu_with_admin_config.yaml'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
       - 'docker-compose.yml'
       - 'go.mod'
       - 'go.sum'
+      - '.github/scripts/admin-compose-smoke.*'
+      - '.github/scripts/download-go-modules.sh'
       - '.github/workflows/admin-build.yml'
   pull_request:
     paths:
       - 'admin/**'
       - 'cmd/admin/**'
+      - 'admin/resources/sql/**'
+      - 'configs/admin_docker_config.yaml'
+      - 'configs/log.yml'
+      - 'configs/pixiu_with_admin_config.yaml'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
       - 'docker-compose.yml'
       - 'go.mod'
       - 'go.sum'
+      - '.github/scripts/admin-compose-smoke.*'
+      - '.github/scripts/download-go-modules.sh'
       - '.github/workflows/admin-build.yml'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -63,7 +80,5 @@ jobs:
       - name: Validate Docker Compose configuration
         run: docker compose config --quiet
 
-      - name: Check and build Admin frontend in Compose
-        run: >-
-          docker compose run --rm --no-deps frontend
-          sh -c 'npm ci --ignore-scripts && npm run typecheck && npm test && npm run build'
+      - name: Start and test the full Compose stack
+        run: sh .github/scripts/admin-compose-smoke.sh
