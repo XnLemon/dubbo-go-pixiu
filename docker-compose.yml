@@ -34,6 +34,12 @@ services:
       - "2380:2380"
     networks:
       - app_network
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health", "--endpoints=http://127.0.0.1:2379"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   # OPA service
   opa:
@@ -63,6 +69,12 @@ services:
       - ./admin/resources/sql:/docker-entrypoint-initdb.d
     networks:
       - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping --host=127.0.0.1 --user=root --password=$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   # pixiu service
   pixiu:
@@ -78,31 +90,35 @@ services:
     networks:
       - app_network
     depends_on:
-      - etcd  # Ensure etcd is ready before starting the backend
-      - opa  # Ensure opa is ready before starting the backend
-      - backend # backend is the xds server for pixiu
+      etcd:
+        condition: service_healthy
+      opa:
+        condition: service_started
+      backend:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "-c", "echo 'Waiting for backend to be ready on port 8081...' && \
       until nc -z pixiu_admin_go_backend 8081; do \
         sleep 3; \
       done && \
       echo 'Backend is ready!' && \
       /app/docker-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8888"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   # backend service(GO)
   backend:
-    image: golang:1.25
+    image: golang:1.25.4-bookworm
     container_name: pixiu_admin_go_backend
     working_dir: /app
     volumes:
       - .:/app
     ports:
       - "8081:8081"
-    command: >
-      sh -c "
-        curl -sS http://pixiu_admin_etcd:2379/health || exit 1 &&
-        go mod tidy &&
-        go run ./cmd/admin/admin.go -c ./configs/admin_docker_config.yaml
-      "
+    command: ["go", "run", "./cmd/admin", "-c", "./configs/admin_docker_config.yaml"]
     environment:
       - GO111MODULE=on
       - GOPROXY=https://goproxy.cn,direct
@@ -110,7 +126,16 @@ services:
     networks:
       - app_network
     depends_on:
-      - etcd  # Ensure etcd is ready before starting the backend
+      etcd:
+        condition: service_healthy
+      mysql_pixiu:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8081/swagger/index.html >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   # frontend（Web）
   frontend:
@@ -125,11 +150,12 @@ services:
       - VITE_BACKEND_URL=http://backend:8081
     command: >
       sh -c "
-        npm ci &&
+        npm ci --ignore-scripts --engine-strict --fetch-retries=3 --fetch-retry-mintimeout=20000 --prefer-offline &&
         npm run dev -- --host 0.0.0.0
       "
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
