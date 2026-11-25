@@ -52,7 +52,8 @@ import (
 )
 
 const (
-	defaultDubboProtocol = "zookeeper"
+	defaultDubboProtocol         = "zookeeper"
+	dubboGettyReadTimeoutMessage = "maybe the client read timeout or fail to decode tcp stream in Writer.Write"
 
 	traceNameDubbogoClient = "dubbogo-client"
 	spanNameDubbogoClient  = "DUBBOGO CLIENT"
@@ -61,6 +62,31 @@ const (
 	spanTagType   = "type"
 	spanTagValues = "values"
 )
+
+// dubboTimeoutError preserves the original error while exposing the timeout
+// through net.Error for callers that classify remote-call errors by type.
+type dubboTimeoutError struct {
+	cause error
+}
+
+func (e *dubboTimeoutError) Error() string   { return e.cause.Error() }
+func (e *dubboTimeoutError) Unwrap() error   { return e.cause }
+func (e *dubboTimeoutError) Timeout() bool   { return true }
+func (e *dubboTimeoutError) Temporary() bool { return false }
+
+// normalizeDubboCallError adapts dubbo-go's private getty read-timeout error
+// to net.Error. The dependency does not currently export a typed sentinel.
+func normalizeDubboCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	cause := errors.Cause(err)
+	if cause != nil && cause.Error() == dubboGettyReadTimeoutMessage {
+		return &dubboTimeoutError{cause: err}
+	}
+	return err
+}
 
 var (
 	dubboClient        *Client
@@ -298,6 +324,7 @@ func (dc *Client) Call(ctx context.Context, req *DubboOutboundRequest) (any, err
 
 	rst, err := gs.Invoke(invokeCtx, req.Method, types, vals)
 	if err != nil {
+		err = normalizeDubboCallError(err)
 		if span != nil {
 			span.RecordError(err)
 		}
