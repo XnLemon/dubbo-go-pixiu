@@ -52,7 +52,9 @@ import (
 )
 
 const (
-	defaultDubboProtocol         = "zookeeper"
+	defaultDubboProtocol = "zookeeper"
+	// dubboGettyReadTimeoutMessage mirrors dubbo-go v3.3.3-0.20260823034811-a9e32b5ec36e's
+	// unexported errClientReadTimeout; recheck it when upgrading dubbo-go.
 	dubboGettyReadTimeoutMessage = "maybe the client read timeout or fail to decode tcp stream in Writer.Write"
 
 	traceNameDubbogoClient = "dubbogo-client"
@@ -74,6 +76,25 @@ func (e *dubboTimeoutError) Unwrap() error   { return e.cause }
 func (e *dubboTimeoutError) Timeout() bool   { return true }
 func (e *dubboTimeoutError) Temporary() bool { return false }
 
+func dubboCallErrorCause(err error) error {
+	for err != nil {
+		if unwrapper, ok := err.(interface{ Unwrap() error }); ok {
+			if cause := unwrapper.Unwrap(); cause != nil {
+				err = cause
+				continue
+			}
+		}
+		if causer, ok := err.(interface{ Cause() error }); ok {
+			if cause := causer.Cause(); cause != nil {
+				err = cause
+				continue
+			}
+		}
+		return err
+	}
+	return nil
+}
+
 // normalizeDubboCallError adapts dubbo-go's private getty read-timeout error
 // to net.Error. The dependency does not currently export a typed sentinel.
 func normalizeDubboCallError(err error) error {
@@ -81,7 +102,7 @@ func normalizeDubboCallError(err error) error {
 		return nil
 	}
 
-	cause := errors.Cause(err)
+	cause := dubboCallErrorCause(err)
 	if cause != nil && cause.Error() == dubboGettyReadTimeoutMessage {
 		return &dubboTimeoutError{cause: err}
 	}
